@@ -1,0 +1,1064 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Quản trị Landing Page — Decal/Tem nhãn</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script>
+/**
+ * Công thức tính giá decal — bản THUẦN JS chạy trên trình duyệt, không cần server.
+ * Cổng logic y hệt src/pricing.js (bản server) — đã test đối chiếu cho ra cùng kết quả.
+ * Chỉ khác: dữ liệu Excel (GIAYDECAL/BETHUONG/KETP/BEKHO/INGIAY/INDECAL) được nhúng sẵn
+ * dưới dạng JSON tĩnh thay vì đọc file .xlsx qua server lúc chạy.
+ */
+(function (global) {
+  'use strict';
+
+  // ---- vlookup: dò bảng giá theo bậc số lượng (giống VLOOKUP(...,TRUE) trong Excel) ----
+  function vlookup(rows, soLuong, opts) {
+    opts = opts || {};
+    if (!rows || rows.length === 0) return 0;
+    var filtered = rows;
+    if (opts.tenDecal && 'Loại giấy' in rows[0]) {
+      filtered = filtered.filter(function (r) { return r['Loại giấy'] === opts.tenDecal; });
+    }
+    var eligible = filtered
+      .filter(function (r) { return typeof r['Số lượng'] === 'number' && r['Số lượng'] <= soLuong; })
+      .sort(function (a, b) { return a['Số lượng'] - b['Số lượng']; });
+    if (eligible.length === 0) return 0;
+    return eligible[eligible.length - 1]['Giá'] || 0;
+  }
+
+  var DIEN_TICH_TO = 32 * 43;
+
+  var NHOM_GIAY_THUONG = [
+    'Decal giấy Oji 32x40', 'Decal giấy Oji 32x43', 'Decal giấy Oji 32x45', 'Decal giấy Oji 33x45', 'Decal giấy Oji 33x48',
+    'Decal đế nhám', 'Decal Fasson', 'Decal Kraft'
+  ];
+
+  function heSoHaoHut(shapeLabel) {
+    if (shapeLabel === 'Hình tròn' || shapeLabel === 'Hình Oval') return 0.45;
+    return 0.7;
+  }
+
+  function xacDinhNhomBe(shape, widthCm, heightCm) {
+    var minDim = Math.min(widthCm, heightCm);
+    if (minDim < 2) return 'BEKHO';
+    return (shape && shape.nhomBe) || 'BETHUONG';
+  }
+
+  function uocLuongSoTemMoiTo(shapeLabel, widthCm, heightCm) {
+    var dienTichHieuDung = DIEN_TICH_TO * heSoHaoHut(shapeLabel);
+    return Math.max(1, Math.floor(dienTichHieuDung / (widthCm * heightCm)));
+  }
+
+  function tinhChiPhiSheetBased(sheets, material, shape, widthCm, heightCm, qty) {
+    if (!sheets || !material) return 0;
+    var soTemMoiTo = uocLuongSoTemMoiTo(shape && shape.label, widthCm, heightCm);
+    var soToGiayCanThiet = Math.max(1, Math.ceil(qty / soTemMoiTo));
+
+    var dungGiayThuong = NHOM_GIAY_THUONG.indexOf(material.excelLoaiGiay) !== -1;
+    var sheetIn = dungGiayThuong ? sheets.INGIAY : sheets.INDECAL;
+    var chiPhiIn = vlookup(sheetIn, soToGiayCanThiet * 2);
+
+    var nhomBe = xacDinhNhomBe(shape, widthCm, heightCm);
+    var chiPhiBe = vlookup(sheets[nhomBe], soToGiayCanThiet);
+
+    var chiPhiGiay = vlookup(sheets.GIAYDECAL, 1, { tenDecal: material.excelLoaiGiay });
+
+    var tong = (chiPhiIn * 2 + chiPhiBe + chiPhiGiay) * soToGiayCanThiet;
+    return tong / qty;
+  }
+
+  function lamTronChanHangNghin(so) {
+    return Math.ceil(so / 1000) * 1000;
+  }
+
+  function promoRateForQty(qty, tiers) {
+    var sorted = (tiers || []).slice().sort(function (a, b) { return b.minQty - a.minQty; });
+    for (var i = 0; i < sorted.length; i++) {
+      if (qty >= sorted[i].minQty) return sorted[i].rate;
+    }
+    return 0;
+  }
+
+  /**
+   * Hàm tính giá chính — tương đương estimate() trong src/pricing.js bản server.
+   * @param {object} sheets   dữ liệu Excel đã nhúng (GIAYDECAL/BETHUONG/KETP/BEKHO/INGIAY/INDECAL)
+   * @param {object} cfg      cấu hình giá (floor, promoTiers, promoCode)
+   * @param {object} input    {material, shape, sides, laminate, rush, width, height, qty, promoCode}
+   *                          material/shape/sides/laminate/rush là object lấy trực tiếp từ danh sách cfg tương ứng
+   */
+  function estimate(sheets, cfg, input) {
+    var material = input.material;
+    var shape = input.shape;
+    var sides = input.sides || { mult: 1 };
+    var laminate = input.laminate || { mult: 1 };
+    var rush = input.rush || { mult: 1 };
+
+    var w = Math.max(parseFloat(input.width) || 0, 1);
+    var h = Math.max(parseFloat(input.height) || 0, 1);
+    var q = Math.max(parseInt(input.qty, 10) || 1, 1);
+
+    var unitFromSheets = tinhChiPhiSheetBased(sheets, material, shape, w, h, q);
+    var rawUnit = unitFromSheets * (sides.mult || 1) * (laminate.mult || 1) * (rush.mult || 1);
+    var unit = Math.max(rawUnit, cfg.floor || 0);
+    var subtotal = unit * q;
+
+    var promoRate = promoRateForQty(q, cfg.promoTiers);
+    var promoAmount = subtotal * promoRate;
+    var afterPromo = subtotal - promoAmount;
+
+    var codeApplied = false;
+    var codeAmount = 0;
+    if (input.promoCode && cfg.promoCode && cfg.promoCode.code &&
+        String(input.promoCode).trim().toUpperCase() === cfg.promoCode.code.toUpperCase()) {
+      codeApplied = true;
+      codeAmount = afterPromo * (cfg.promoCode.rate || 0);
+    }
+
+    var total = lamTronChanHangNghin(afterPromo - codeAmount);
+
+    var subtotalRounded = lamTronChanHangNghin(subtotal);
+    var displayUnit = Math.floor(subtotalRounded / q);
+    var displaySubtotal = displayUnit * q;
+    var displayPromo = Math.max(0, displaySubtotal - total);
+
+    return {
+      material: material ? material.title : null,
+      shape: shape ? shape.label : null,
+      quantity: q,
+      unit: displayUnit,
+      subtotal: displaySubtotal,
+      promoRate: promoRate,
+      promoAmount: displayPromo,
+      codeApplied: codeApplied,
+      codeAmount: 0,
+      total: total
+    };
+  }
+
+  global.DecalPricingEngine = {
+    vlookup: vlookup,
+    estimate: estimate,
+    heSoHaoHut: heSoHaoHut,
+    xacDinhNhomBe: xacDinhNhomBe,
+    uocLuongSoTemMoiTo: uocLuongSoTemMoiTo
+  };
+})(typeof window !== 'undefined' ? window : globalThis);
+
+</script>
+<style>
+  :root{
+    --primary:#0D5FBE; --primary-light:#EAF2FD; --accent:#FF7A1A; --accent-dark:#E86400;
+    --ink:#16233D; --ink-soft:#5B6B84; --bg-soft:#F5F8FC; --border:#E4E9F0;
+  }
+  *,*::before,*::after{box-sizing:border-box;}
+  body{margin:0;font-family:'Inter',system-ui,sans-serif;color:var(--ink);background:var(--bg-soft);}
+  button{font-family:inherit;cursor:pointer;}
+
+  .topbar{position:sticky;top:0;z-index:20;background:#fff;border-bottom:1px solid var(--border);padding:12px 20px;display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;}
+  .topbar h1{font-size:15px;margin:0;font-weight:700;}
+  .topbar .status{font-size:12px;color:var(--ink-soft);}
+  .topbar .actions{display:flex;gap:10px;flex-wrap:wrap;}
+  .btn{font-size:13px;font-weight:600;padding:9px 16px;border-radius:8px;border:1px solid var(--border);background:#fff;color:var(--ink);}
+  .btn:hover{border-color:var(--primary);color:var(--primary);}
+  .btn-primary{background:var(--accent);border-color:var(--accent);color:#fff;}
+  .btn-primary:hover{background:var(--accent-dark);border-color:var(--accent-dark);color:#fff;}
+  .btn-ghost{border-color:transparent;color:var(--ink-soft);}
+  .btn-ghost:hover{color:#E4572E;border-color:#F3C9BB;background:#FDF3F0;}
+
+  .layout{display:grid;grid-template-columns:440px 1fr;height:calc(100vh - 53px);}
+  .panel{overflow-y:auto;padding:20px;border-right:1px solid var(--border);background:#fff;}
+  .preview-pane{background:#EDEFF3;padding:16px;overflow:hidden;}
+  .preview-pane iframe{width:100%;height:100%;border:0;border-radius:10px;background:#fff;box-shadow:0 4px 20px rgba(22,35,61,.08);}
+
+  details.section{border:1px solid var(--border);border-radius:10px;margin-bottom:14px;overflow:hidden;}
+  details.section summary{padding:13px 16px;font-size:13.5px;font-weight:700;cursor:pointer;background:var(--bg-soft);list-style:none;display:flex;align-items:center;justify-content:space-between;}
+  details.section summary::-webkit-details-marker{display:none;}
+  details.section summary::after{content:'+';font-size:16px;color:var(--ink-soft);}
+  details.section[open] summary::after{content:'−';}
+  details.section .content{padding:16px;}
+
+  .f-row{margin-bottom:14px;}
+  .f-row label{display:block;font-size:12px;font-weight:600;color:var(--ink-soft);margin-bottom:6px;}
+  .f-row input[type="text"],.f-row input[type="url"],.f-row textarea{width:100%;padding:9px 11px;border:1px solid var(--border);border-radius:7px;font-family:inherit;font-size:13px;color:var(--ink);}
+  .f-row textarea{resize:vertical;min-height:52px;}
+  .f-row input:focus,.f-row textarea:focus{outline:none;border-color:var(--primary);}
+  .f-row .hint{font-size:11px;color:#8B96A8;margin-top:4px;}
+  .img-preview{width:100%;height:90px;object-fit:cover;border-radius:7px;margin-top:8px;border:1px solid var(--border);background:var(--bg-soft);}
+  .upload-row{display:flex;align-items:center;gap:10px;margin-top:8px;flex-wrap:wrap;}
+  .upload-row input[type="file"]{flex:1;font-size:11.5px;padding:6px;border:1px dashed var(--border);border-radius:7px;background:#fff;min-width:160px;}
+  .upload-status{font-size:11px;color:var(--ink-soft);}
+  .upload-status.ok{color:#1D9A5B;}
+  .upload-status.err{color:#E4572E;}
+
+  .item-card{border:1px solid var(--border);border-radius:9px;padding:14px;margin-bottom:12px;position:relative;background:var(--bg-soft);}
+  .item-card .item-top{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;}
+  .item-card .item-top span{font-size:11px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.03em;}
+  .item-remove{font-size:11px;color:#E4572E;background:none;border:0;font-weight:600;}
+  .item-remove:hover{text-decoration:underline;}
+  .add-item-btn{width:100%;padding:10px;border:1.5px dashed var(--border);border-radius:9px;background:#fff;color:var(--primary);font-size:13px;font-weight:600;}
+  .add-item-btn:hover{border-color:var(--primary);background:var(--primary-light);}
+  .color-row{display:flex;align-items:center;gap:10px;}
+  .color-row input[type="color"]{width:40px;height:34px;border:1px solid var(--border);border-radius:6px;padding:2px;}
+  .price-row{display:flex;align-items:center;gap:8px;}
+  .price-row input{width:100px !important;}
+
+  @media (max-width:900px){
+    .layout{grid-template-columns:1fr;height:auto;}
+    .panel{border-right:0;border-bottom:1px solid var(--border);}
+    .preview-pane{height:70vh;}
+  }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <h1>🛠️ Quản trị Landing Page — Decal / Tem nhãn</h1>
+  <span class="status" id="saveStatus">Sẵn sàng</span>
+  <div class="actions">
+    <button class="btn btn-ghost" id="resetBtn">Khôi phục mặc định</button>
+    <button class="btn" id="draftBtn">💾 Lưu nội dung</button>
+    <button class="btn btn-primary" id="exportBtn">⬇ Xuất file HTML</button>
+  </div>
+</div>
+
+<div class="layout">
+  <div class="panel" id="formPanel"></div>
+  <div class="preview-pane"><iframe id="previewFrame" title="Xem trước landing page"></iframe></div>
+</div>
+
+<script>
+(function(){
+
+  /* ---------------- Default content ---------------- */
+  function defaultContent(){
+    return {
+      brand: "IN NHANH BA ĐÌNH",
+      phone: "0567.779.888",
+      hero: {
+        eyebrow: "🏷️ In Decal / Tem nhãn",
+        title: "In decal, tem nhãn",
+        titleEm: "theo đúng hình bạn cần",
+        lead: "Bế theo mọi hình dạng, đủ chất liệu từ decal giấy đến tem chống giả 7 màu. Ước tính giá ngay bên dưới, không cần chờ tư vấn.",
+        image: "https://innhanhbadinh.vn/uploads/products/1/photo_20260710083500.png",
+        badge: "Từ 200đ / tem"
+      },
+      materials: [
+        {title:"Decal giấy", excelLoaiGiay:"Decal giấy Oji 32x43", color:"#F3EEE4", bullets:["Giá tốt nhất trong các chất liệu","Hợp sản phẩm dùng một lần","Không khuyến khích nơi ẩm/nước"]},
+        {title:"Decal nhựa PVC", excelLoaiGiay:"Decal nhựa", color:"#7FB8F2", bullets:["Chống nước, chống rách","Bền khi dán ngoài trời","Bề mặt bóng, cao cấp hơn giấy"]},
+        {title:"Decal trong", excelLoaiGiay:"Decal Trong", color:"#D7E6F5", bullets:["Nền trong suốt, thấy rõ sản phẩm","Hợp chai/lọ thuỷ tinh, nhựa trong","Không lộ viền trắng khi dán"]},
+        {title:"Decal sữa", excelLoaiGiay:"Decal PP", color:"#F7F7F5", bullets:["Nền trắng đục, che phủ tốt","Không bóng, chống chói sáng","Hợp mỹ phẩm, thực phẩm"]},
+        {title:"Decal vỡ", excelLoaiGiay:"Vỡ dẻo", color:"#F0C9B0", bullets:["Tự huỷ hoạ tiết khi bóc ra","Chống làm giả, chống tái sử dụng","Dùng cho tem bảo hành, niêm phong"]},
+        {title:"Tem 7 màu chống giả", excelLoaiGiay:"Decal 7 màu", color:"#B5179E", bullets:["Đổi ánh màu theo góc nhìn","Khó sao chép, khó làm giả","Có thể đi kèm mã số tem"]},
+        {title:"Decal chịu nhiệt", excelLoaiGiay:"Decal nhựa", color:"#FFB870", bullets:["Chịu nhiệt độ cao, không bong","Không phai màu ngoài nắng","Hợp sản phẩm đóng gói nóng"]},
+        {title:"Decal nhũ vàng/bạc", excelLoaiGiay:"Gương vàng", color:"#D9A93B", bullets:["Ánh kim sang trọng","Hợp nhãn mỹ phẩm, rượu, quà tặng","Ép nhũ thật, không phải in giả"]}
+      ],
+      process: [
+        {title:"Chọn & ước tính giá", desc:"Chọn chất liệu, kích thước, số lượng ở trên."},
+        {title:"Gửi file thiết kế", desc:"Gửi qua Zalo hoặc điện thoại, nhận báo giá chính xác."},
+        {title:"Nhận hàng", desc:"In, bế và giao trong 24h nội thành Hà Nội."}
+      ],
+      why: [
+        {title:"Bế theo mọi hình dạng", desc:"Không giới hạn hình vuông/tròn — gửi file, xưởng bế đúng theo yêu cầu."},
+        {title:"Xưởng in trực tiếp", desc:"Không qua trung gian, kiểm soát chất lượng 100% trước khi giao."},
+        {title:"Giao nhanh 24h", desc:"Nội thành Hà Nội, không phát sinh chi phí gấp."}
+      ],
+      gallery: [
+        "https://innhanhbadinh.vn/uploads/products/1/photo_20260710083500.png",
+        "https://innhanhbadinh.vn/uploads/products/13/photo_20260710084518.jpg"
+      ],
+      finalCta: { title:"Cần in decal gấp?", desc:"Gửi file ngay, nhận báo giá trong 15 phút." },
+      footerNote: "Thanh Liệt, Hà Nội",
+      pricing: {
+        floor: 130,
+        shapes: [
+          {label:"Hình tròn", nhomBe:"BETHUONG"},
+          {label:"Hình Oval", nhomBe:"BETHUONG"},
+          {label:"Hình Vuông", nhomBe:"KETP"},
+          {label:"Vuông Bo góc", nhomBe:"BETHUONG"},
+          {label:"Hình CN", nhomBe:"KETP"},
+          {label:"HCN Bo góc", nhomBe:"BETHUONG"},
+          {label:"Hình hoa", nhomBe:"BEKHO"},
+          {label:"Hình khác", nhomBe:"BEKHO"}
+        ],
+        sides: [
+          {label:"1 mặt", mult:1},
+          {label:"2 mặt", mult:1.6}
+        ],
+        laminate: [
+          {label:"Không cán màng", mult:1},
+          {label:"Cán bóng", mult:1.15},
+          {label:"Cán mờ", mult:1.15}
+        ],
+        rush: [
+          {label:"Giao thường (24h)", mult:1},
+          {label:"Giao gấp (12h)", mult:1.25}
+        ],
+        promoTiers: [
+          {minQty:500, rate:0.05},
+          {minQty:1000, rate:0.08},
+          {minQty:5000, rate:0.12}
+        ],
+        promoCode: {code:"BADINH5", rate:0.05}
+      }
+    };
+  }
+
+  var STORAGE_KEY = 'decal-landing-content-v1';
+  var content = defaultContent();
+  // Dữ liệu Excel (GIAYDECAL/BETHUONG/KETP/BEKHO/INGIAY/INDECAL) nhúng sẵn — không cần server.
+  // Có thể thay bằng file .xlsx mới qua mục "Dữ liệu Excel" (xử lý ngay trên trình duyệt).
+  var excelSheets = {"GIAYDECAL": [{"Giá": 1700, "Số lượng": 1, "Loại giấy": "Decal giấy Oji 32x40"}, {"Giá": 1700, "Số lượng": 1, "Loại giấy": "Decal giấy Oji 32x43"}, {"Giá": 1800, "Số lượng": 1, "Loại giấy": "Decal giấy Oji 32x45"}, {"Giá": 1900, "Số lượng": 1, "Loại giấy": "Decal giấy Oji 33x48"}, {"Giá": 1500, "Số lượng": 1, "Loại giấy": "Decal đế nhám"}, {"Giá": 1700, "Số lượng": 1, "Loại giấy": "amazon chấm xanh"}, {"Giá": 2000, "Số lượng": 1, "Loại giấy": "Decal Fasson"}, {"Giá": 2000, "Số lượng": 1, "Loại giấy": "Decal Kraft"}, {"Giá": 1700, "Số lượng": 1, "Loại giấy": "amazon chấm đỏ"}, {"Giá": 3500, "Số lượng": 1, "Loại giấy": "Decal nhựa"}, {"Giá": 2800, "Số lượng": 1, "Loại giấy": "Decal PP"}, {"Giá": 10000, "Số lượng": 1, "Loại giấy": "Vỡ dẻo"}, {"Giá": 15000, "Số lượng": 1, "Loại giấy": "Vỡ KoanHao"}, {"Giá": 10000, "Số lượng": 1, "Loại giấy": "Vỡ giòn"}, {"Giá": 5000, "Số lượng": 1, "Loại giấy": "Decal 7 màu"}, {"Giá": 3500, "Số lượng": 1, "Loại giấy": "Decal Gương"}, {"Giá": 3500, "Số lượng": 1, "Loại giấy": "Decal Trong"}, {"Giá": 3000, "Số lượng": 1, "Loại giấy": "Decal Bạc"}, {"Giá": 4000, "Số lượng": 1, "Loại giấy": "Gương vàng"}], "BETHUONG": [{"Giá": 8000, "Số lượng": 1}, {"Giá": 7000, "Số lượng": 21}, {"Giá": 6000, "Số lượng": 41}, {"Giá": 5000, "Số lượng": 51}, {"Giá": 3500, "Số lượng": 101}, {"Giá": 3000, "Số lượng": 151}], "KETP": [{"Giá": 5000, "Số lượng": 1}, {"Giá": 4500, "Số lượng": 21}, {"Giá": 4000, "Số lượng": 41}, {"Giá": 3500, "Số lượng": 51}, {"Giá": 3000, "Số lượng": 101}, {"Giá": 2500, "Số lượng": 151}], "BEKHO": [{"Giá": 15000, "Số lượng": 1}, {"Giá": 10000, "Số lượng": 21}, {"Giá": 8000, "Số lượng": 41}, {"Giá": 7000, "Số lượng": 51}, {"Giá": 6000, "Số lượng": 101}, {"Giá": 5000, "Số lượng": 151}], "INGIAY": [{"Giá": 2000, "Số lượng": 1}, {"Giá": 1700, "Số lượng": 51}, {"Giá": 1500, "Số lượng": 101}, {"Giá": 1300, "Số lượng": 201}, {"Giá": 1200, "Số lượng": 301}, {"Giá": 1100, "Số lượng": 401}, {"Giá": 1000, "Số lượng": 501}, {"Giá": 1000, "Số lượng": 601}, {"Giá": 1000, "Số lượng": 701}, {"Giá": 1000, "Số lượng": 801}, {"Giá": 1000, "Số lượng": 901}, {"Giá": 900, "Số lượng": 1001}, {"Giá": 850, "Số lượng": 2001}, {"Giá": 800, "Số lượng": 3001}, {"Giá": 750, "Số lượng": 5001}, {"Giá": 700, "Số lượng": 15001}], "INDECAL": [{"Giá": 3000, "Số lượng": 1}, {"Giá": 2700, "Số lượng": 51}, {"Giá": 2500, "Số lượng": 101}, {"Giá": 2000, "Số lượng": 201}, {"Giá": 1800, "Số lượng": 301}, {"Giá": 1600, "Số lượng": 401}, {"Giá": 1500, "Số lượng": 501}, {"Giá": 1400, "Số lượng": 601}, {"Giá": 1300, "Số lượng": 701}, {"Giá": 1200, "Số lượng": 801}, {"Giá": 1200, "Số lượng": 901}, {"Giá": 1100, "Số lượng": 1001}, {"Giá": 1100, "Số lượng": 2001}, {"Giá": 1000, "Số lượng": 3001}, {"Giá": 1000, "Số lượng": 5001}, {"Giá": 900, "Số lượng": 15001}]};
+  var saveTimer = null, previewTimer = null;
+
+  function esc(s){
+    return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  function formatPrice(n){ return Math.round(n).toLocaleString('vi-VN') + 'đ'; }
+
+  var SHAPE_ICONS = {
+    "Hình tròn": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="9"/></svg>',
+    "Hình Oval": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><ellipse cx="12" cy="12" rx="10" ry="6"/></svg>',
+    "Hình Vuông": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="4" y="4" width="16" height="16"/></svg>',
+    "Vuông Bo góc": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="4" y="4" width="16" height="16" rx="4"/></svg>',
+    "Hình CN": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="2" y="6" width="20" height="12"/></svg>',
+    "HCN Bo góc": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="2" y="6" width="20" height="12" rx="4"/></svg>',
+    "Hình hoa": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="18" cy="12" r="5"/><circle cx="15" cy="17.2" r="5"/><circle cx="9" cy="17.2" r="5"/><circle cx="6" cy="12" r="5"/><circle cx="9" cy="6.8" r="5"/><circle cx="15" cy="6.8" r="5"/></svg>',
+    "Hình khác": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-dasharray="3 2"><rect x="4" y="4" width="16" height="16" rx="6"/></svg>'
+  };
+  var SHAPE_ICON_FALLBACK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-dasharray="3 2"><rect x="4" y="4" width="16" height="16" rx="6"/></svg>';
+
+  function renderShapeButtons(shapes){
+    return shapes.map(function(s, i){
+      var icon = SHAPE_ICONS[s.label] || SHAPE_ICON_FALLBACK;
+      return '<button type="button" class="shape-btn' + (i===0?' active':'') + '" data-group="shape" data-surcharge="' + (s.surcharge||0) + '">' + icon + esc(s.label) + '</button>';
+    }).join('');
+  }
+
+  function renderToggleButtons(group, items){
+    return items.map(function(it, i){
+      return '<button type="button" class="toggle-btn' + (i===0?' active':'') + '" data-group="' + group + '" data-mult="' + (it.mult||1) + '">' + esc(it.label) + '</button>';
+    }).join('');
+  }
+
+  /* ---------------- Content persistence (LOCAL — không cần server, dùng localStorage hoặc
+     window.storage nếu đang mở trong Claude) ---------------- */
+  var LOCAL_KEY = 'decal-static-admin-content-v1';
+
+  function trySet(key, value){
+    try {
+      if (typeof window.storage !== 'undefined' && window.storage) {
+        window.storage.set(key, value).catch(function(){});
+      }
+    } catch (e) {}
+    try { localStorage.setItem(key, value); } catch (e) { /* artifact có thể chặn — bỏ qua, không crash */ }
+  }
+
+  function tryGet(key){
+    try { var v = localStorage.getItem(key); if (v) return Promise.resolve(v); } catch (e) {}
+    try {
+      if (typeof window.storage !== 'undefined' && window.storage) {
+        return window.storage.get(key).then(function(r){ return r && r.value; }).catch(function(){ return null; });
+      }
+    } catch (e) {}
+    return Promise.resolve(null);
+  }
+
+  function saveLocal(){
+    var status = document.getElementById('saveStatus');
+    trySet(LOCAL_KEY, JSON.stringify(content));
+    trySet('decal-static-excel-data-v1', JSON.stringify(excelSheets));
+    status.textContent = 'Đã lưu bản nháp lúc ' + new Date().toLocaleTimeString('vi-VN') + ' (chỉ lưu ở trình duyệt này)';
+  }
+
+  function loadLocal(){
+    tryGet(LOCAL_KEY).then(function(v){
+      if (v) { try { content = Object.assign(defaultContent(), JSON.parse(v)); } catch (e) { content = defaultContent(); } }
+      return tryGet('decal-static-excel-data-v1');
+    }).then(function(ev){
+      if (ev) { try { excelSheets = JSON.parse(ev); } catch (e) {} }
+      renderAll();
+    }).catch(function(){ renderAll(); });
+  }
+
+  /* ---------------- Page template generator (also used for export) ---------------- */
+  function renderPageHTML(c, excelData){
+    var materialCards = c.materials.map(function(m){
+      var bullets = (m.bullets||[]).map(function(b){ return '<li>' + esc(b) + '</li>'; }).join('');
+      return '' +
+        '<div class="material-card reveal is-visible">' +
+          '<div class="material-visual"><svg viewBox="0 0 140 180">' +
+            '<ellipse cx="70" cy="167" rx="32" ry="7" fill="url(#baseShadow)"/>' +
+            '<g filter="url(#bottleShadow)">' +
+              '<rect x="58" y="28" width="24" height="16" fill="url(#bottleGrad)"/>' +
+              '<rect x="53" y="10" width="34" height="20" rx="5" fill="url(#capGrad)" stroke="#94A1B7" stroke-width="1"/>' +
+              '<ellipse cx="70" cy="10" rx="16" ry="3.5" fill="#F0F4F8"/>' +
+              '<rect x="30" y="55" width="80" height="108" rx="16" fill="url(#bottleGrad)" stroke="#AEB8CA" stroke-width="1"/>' +
+              '<rect x="30" y="94" width="80" height="44" fill="' + esc(m.color||'#F3EEE4') + '" stroke="rgba(22,35,61,.1)"/>' +
+              '<rect x="30" y="94" width="80" height="44" fill="url(#sheen)" opacity=".4"/>' +
+            '</g>' +
+          '</svg></div>' +
+          '<div class="material-body"><h3>' + esc(m.title) + '</h3><ul>' + bullets + '</ul></div>' +
+        '</div>';
+    }).join('');
+
+    var processSteps = c.process.map(function(s, i){
+      return '<div class="process-3-card reveal is-visible"><div class="num">' + (i+1) + '</div><h3>' + esc(s.title) + '</h3><p>' + esc(s.desc) + '</p></div>';
+    }).join('');
+
+    var whyCards = c.why.map(function(w){
+      return '<div class="why-3-card reveal is-visible"><div class="ico">✦</div><h3>' + esc(w.title) + '</h3><p>' + esc(w.desc) + '</p></div>';
+    }).join('');
+
+    var galleryImgs = c.gallery.map(function(url){
+      return '<img src="' + esc(url) + '" alt="Mẫu thực tế">';
+    }).join('');
+
+    var galleryThumbs = c.gallery.map(function(url, i){
+      return '<img class="' + (i===0?'active':'') + '" data-full="' + esc(url) + '" src="' + esc(url) + '" alt="Mẫu ' + (i+1) + '">';
+    }).join('');
+
+    var mainImg = c.gallery[0] || c.hero.image;
+
+    // Bảng giá tham khảo — khung rỗng, JS phía trang (client) tự tính lại theo ĐÚNG lựa chọn
+    // khách đang chọn ở phần Ước tính (hình dạng, kích thước, chất liệu...), không cố định.
+    var priceTableHTML =
+      '<div class="price-hl-row" id="priceHlRow"></div>' +
+      '<div class="price-table-wrap"><table class="price-table"><thead><tr>' +
+      '<th>Số lượng</th><th>Đơn giá</th><th>Thành tiền</th></tr></thead>' +
+      '<tbody id="priceTableBody"></tbody></table></div>';
+
+    function renderOptBtns(items, group, extraClass, withIcon, labelKey) {
+      labelKey = labelKey || 'label';
+      return items.map(function (it, i) {
+        var lbl = it[labelKey];
+        var icon = withIcon ? (SHAPE_ICONS[lbl] || SHAPE_ICON_FALLBACK) : '';
+        return '<button type="button" class="opt-btn ' + extraClass + (i === 0 ? ' active' : '') +
+          '" data-group="' + group + '" data-idx="' + i + '">' + icon + esc(lbl) + '</button>';
+      }).join('');
+    }
+    var shapeBtnsHTML = renderOptBtns(c.pricing.shapes, 'shape', 'shape-btn', true);
+    var materialBtnsHTML = renderOptBtns(c.materials, 'material', 'material-pill', false, 'title');
+    var laminateBtnsHTML = renderOptBtns(c.pricing.laminate, 'laminate', 'toggle-btn', false);
+    var rushBtnsHTML = renderOptBtns(c.pricing.rush, 'rush', 'toggle-btn', false);
+
+    return '<!DOCTYPE html><html lang="vi"><head><meta charset="UTF-8">' +
+    '<meta name="viewport" content="width=device-width, initial-scale=1.0">' +
+    '<title>' + esc(c.hero.title) + ' — ' + esc(c.brand) + '</title>' +
+    '<link rel="preconnect" href="https://fonts.googleapis.com">' +
+    '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>' +
+    '<link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@500;600;700;800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">' +
+    '<style>' + TEMPLATE_CSS + '</style></head><body>' +
+
+    '<header><div class="wrap header-top">' +
+      '<a href="#top" class="brand"><span class="logo-box">IN</span><b>' + esc(c.brand) + '</b></a>' +
+      '<div class="header-actions">' +
+        '<a href="tel:' + esc(c.phone.replace(/\./g,'')) + '" class="phone-chip">' +
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.127.96.362 1.903.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.338 1.85.573 2.81.7A2 2 0 0 1 22 16.92z"/></svg>' +
+          esc(c.phone) +
+        '</a>' +
+        '<a href="#estimate" class="btn btn-primary">Ước tính giá</a>' +
+      '</div>' +
+    '</div></header>' +
+
+    '<main id="top">' +
+      '<section class="hero"><div class="wrap">' +
+        '<div class="reveal is-visible">' +
+          '<div class="eyebrow">' + esc(c.hero.eyebrow) + '</div>' +
+          '<h1>' + esc(c.hero.title) + ' <em>' + esc(c.hero.titleEm) + '</em></h1>' +
+          '<p class="lead">' + esc(c.hero.lead) + '</p>' +
+          '<div class="hero-badges">' +
+            '<div><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>Báo giá tức thì</div>' +
+            '<div><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6L9 17l-5-5"/></svg>Bế theo hình bất kỳ</div>' +
+            '<div><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="1" y="6" width="15" height="12" rx="1"/><path d="M16 10h3l3 3v5h-6z"/><circle cx="6" cy="20" r="2"/><circle cx="18" cy="20" r="2"/></svg>Giao 24h nội thành</div>' +
+          '</div>' +
+          '<div class="hero-ctas"><a href="#estimate" class="btn btn-primary">Ước tính giá ngay ↓</a><a href="tel:' + esc(c.phone.replace(/\./g,'')) + '" class="btn btn-outline">☎ Gọi tư vấn</a></div>' +
+        '</div>' +
+        '<div class="hero-visual reveal is-visible"><img src="' + esc(c.hero.image) + '" alt="Ảnh sản phẩm"><span class="tag">' + esc(c.hero.badge) + '</span></div>' +
+      '</div></section>' +
+
+      '<section id="loai-decal"><div class="wrap">' +
+        '<div class="section-head reveal is-visible"><h2>Chọn chất liệu phù hợp</h2><p>Cần loại khác cứ nhắn, xưởng có thể sản xuất theo yêu cầu.</p></div>' +
+        '<svg width="0" height="0" style="position:absolute"><defs>' +
+          '<linearGradient id="bottleGrad" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="#B7C0D0"/><stop offset="14%" stop-color="#D7DEE9"/><stop offset="32%" stop-color="#F7FAFC"/><stop offset="52%" stop-color="#E1E7F0"/><stop offset="78%" stop-color="#CBD3E0"/><stop offset="100%" stop-color="#AFB9CB"/></linearGradient>' +
+          '<linearGradient id="capGrad" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="#8D9AB0"/><stop offset="18%" stop-color="#B8C4D6"/><stop offset="38%" stop-color="#EEF2F7"/><stop offset="62%" stop-color="#AEB9CC"/><stop offset="100%" stop-color="#8895AC"/></linearGradient>' +
+          '<radialGradient id="baseShadow" cx="50%" cy="50%" r="50%"><stop offset="0%" stop-color="#16233D" stop-opacity=".28"/><stop offset="100%" stop-color="#16233D" stop-opacity="0"/></radialGradient>' +
+          '<linearGradient id="sheen" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="#fff" stop-opacity="0"/><stop offset="42%" stop-color="#fff" stop-opacity=".55"/><stop offset="58%" stop-color="#fff" stop-opacity="0"/><stop offset="100%" stop-color="#fff" stop-opacity="0"/></linearGradient>' +
+          '<filter id="bottleShadow" x="-30%" y="-30%" width="160%" height="160%"><feDropShadow dx="0" dy="4" stdDeviation="4" flood-color="#16233D" flood-opacity="0.18"/></filter>' +
+        '</defs></svg>' +
+        '<div class="materials-grid">' + materialCards + '</div>' +
+      '</div></section>' +
+
+      '<section id="estimate" class="estimator"><div class="wrap">' +
+        '<div class="section-head reveal is-visible"><div class="eyebrow">◷ Ước tính nhanh</div><h2>Xem giá ngay — không cần chờ</h2><p>Chọn kiểu bế, chất liệu, số lượng — giá cập nhật tức thì.</p></div>' +
+        '<div class="estimator-box reveal is-visible">' +
+          '<div>' +
+          '<div id="estimatorFields">' +
+            '<div class="field"><label>Kiểu bế</label><div class="shape-grid" id="shapeGrid">' + shapeBtnsHTML + '</div></div>' +
+            '<div class="field-row"><div class="field"><label id="widthLabel">Chiều rộng (cm)</label><input type="number" id="width" min="1" step="0.5" placeholder="VD: 5"></div><div class="field" id="heightField"><label>Chiều cao (cm)</label><input type="number" id="height" min="1" step="0.5" placeholder="VD: 5"></div></div>' +
+            '<div class="field"><label>Chất liệu</label><div class="material-pills" id="materialPills">' + materialBtnsHTML + '</div></div>' +
+            '<div class="field"><label>Loại màng</label><div class="toggle-group" id="laminateGroup">' + laminateBtnsHTML + '</div></div>' +
+            '<div class="field"><label>Thời gian</label><div class="toggle-group" id="rushGroup">' + rushBtnsHTML + '</div></div>' +
+            '<div class="field" style="margin-bottom:0;"><label>Số lượng</label><input type="number" id="qty" value="100" min="1" step="1"><div class="qty-presets"><span class="qty-preset active" data-qty="100">100</span><span class="qty-preset" data-qty="200">200</span><span class="qty-preset" data-qty="300">300</span><span class="qty-preset" data-qty="500">500</span><span class="qty-preset" data-qty="1000">1.000</span><span class="qty-preset" data-qty="2000">2.000</span><span class="qty-preset" data-qty="5000">5.000</span></div></div>' +
+          '</div>' +
+          '</div>' +
+          '<div><div class="price-summary">' +
+            '<div class="price-row-line"><span>Đơn giá</span><span class="amount" id="unitLine">—</span></div>' +
+            '<div class="price-row-line promo"><span>Khuyến mãi</span><span class="amount" id="promoLine">0đ</span></div>' +
+            '<div class="price-row-line total"><span>Thành tiền</span><span class="amount" id="totalPrice">0đ</span></div>' +
+            '<div class="summary-note"><textarea placeholder="Ghi chú (kích thước, màu sắc, yêu cầu riêng...)"></textarea></div>' +
+            '<div class="promo-row"><input type="text" id="promoCode" placeholder="Nhập mã giảm giá nếu có"><button type="button" id="applyPromo">Áp dụng</button></div><div class="promo-msg" id="promoMsg"></div>' +
+            '<div class="summary-ctas"><a href="https://innhanhbadinh.vn/order.php" target="_blank" rel="noopener" class="btn btn-primary">Đặt hàng ngay</a></div>' +
+            '<div class="product-gallery"><div class="gallery-main"><img id="galleryMain" src="' + esc(mainImg) + '" alt="Mẫu thực tế"></div><div class="gallery-thumbs">' + galleryThumbs + '</div></div>' +
+          '</div></div>' +
+        '</div>' +
+      '</div></section>' +
+
+      '<section id="price-table" style="background:var(--bg-soft);"><div class="wrap">' +
+        '<div class="section-head reveal is-visible"><h2>📊 Bảng giá tham khảo</h2><p id="priceTableDesc">Chọn kiểu bế, kích thước, chất liệu ở trên để xem đủ các mức giá theo số lượng</p></div>' +
+        priceTableHTML +
+      '</div></section>' +
+
+      '<section id="quy-trinh"><div class="wrap"><div class="section-head reveal is-visible"><h2>' + c.process.length + ' bước là xong</h2></div><div class="process-3" style="grid-template-columns:repeat(' + c.process.length + ',1fr);">' + processSteps + '</div></div></section>' +
+
+      '<section style="background:var(--bg-soft);"><div class="wrap"><div class="section-head reveal is-visible"><h2>Vì sao chọn ' + esc(c.brand) + '?</h2></div><div class="why-3">' + whyCards + '</div></div></section>' +
+
+      '<section><div class="wrap"><div class="section-head reveal is-visible"><h2>Một vài mẫu thực tế</h2></div><div class="gallery-2">' + galleryImgs + '</div></div></section>' +
+
+      '<section class="final-cta"><div class="wrap"><h2>' + esc(c.finalCta.title) + '</h2><p>' + esc(c.finalCta.desc) + '</p>' +
+        '<div style="display:flex;gap:12px;justify-content:center;flex-wrap:wrap;"><a href="tel:' + esc(c.phone.replace(/\./g,'')) + '" class="btn btn-outline">☎ ' + esc(c.phone) + '</a><a href="#estimate" class="btn" style="background:#fff;color:var(--primary);">Ước tính giá lại</a></div>' +
+      '</div></section>' +
+    '</main>' +
+
+    '<footer><div class="wrap"><span>© 2026 ' + esc(c.brand) + ' — ' + esc(c.footerNote) + '</span><span>Hotline: ' + esc(c.phone) + '</span></div></footer>' +
+
+    '<script>' +
+      'var PRICING_CFG=' + JSON.stringify({
+        floor: c.pricing.floor, shapes: c.pricing.shapes, materials: c.materials,
+        laminate: c.pricing.laminate, rush: c.pricing.rush,
+        promoTiers: c.pricing.promoTiers, promoCode: c.pricing.promoCode
+      }) + ';' +
+      'var EXCEL_SHEETS=' + JSON.stringify(excelData) + ';' +
+    '<' + '/script>' +
+    '<script>' + PRICING_ENGINE_JS + '<' + '/script>' +
+    '<script>' + PAGE_JS + '<' + '/script>' +
+    '</body></html>';
+  }
+
+  var TEMPLATE_CSS = ":root{--primary:#0D5FBE;--primary-dark:#0A4A94;--primary-light:#EAF2FD;--accent:#FF7A1A;--accent-dark:#E86400;--ink:#16233D;--ink-soft:#5B6B84;--bg:#FFFFFF;--bg-soft:#F5F8FC;--border:#E4E9F0;--radius:12px;--maxw:1080px;--ease:cubic-bezier(.4,0,.2,1);}*,*::before,*::after{box-sizing:border-box;}html{scroll-behavior:smooth;}body{margin:0;background:var(--bg);color:var(--ink);font-family:'Inter',system-ui,sans-serif;line-height:1.55;-webkit-font-smoothing:antialiased;}h1,h2,h3{font-family:'Be Vietnam Pro',sans-serif;font-weight:700;margin:0;line-height:1.2;}a{color:inherit;text-decoration:none;}img{display:block;max-width:100%;}.wrap{max-width:var(--maxw);margin:0 auto;padding:0 24px;}button{font-family:inherit;cursor:pointer;}.reveal{opacity:1;}.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;font-size:14.5px;font-weight:600;padding:13px 24px;border-radius:9px;border:1px solid transparent;transition:transform .2s var(--ease),background .2s var(--ease);}.btn-primary{background:var(--accent);color:#fff;box-shadow:0 6px 16px rgba(255,122,26,.28);}.btn-primary:hover{transform:translateY(-2px);background:var(--accent-dark);}.btn-outline{background:#fff;border-color:var(--border);color:var(--ink);}.btn-outline:hover{border-color:var(--primary);color:var(--primary);}header{position:fixed;top:0;left:0;right:0;z-index:60;background:#fff;border-bottom:1px solid var(--border);}.header-top{display:flex;align-items:center;justify-content:space-between;padding:14px 0;}.brand{display:flex;align-items:center;gap:10px;}.brand .logo-box{width:38px;height:38px;background:var(--primary);border-radius:8px;display:flex;align-items:center;justify-content:center;color:#fff;font-family:'Be Vietnam Pro';font-weight:800;font-size:13px;flex:none;}.brand b{font-family:'Be Vietnam Pro';font-weight:800;font-size:14.5px;}.header-actions{display:flex;align-items:center;gap:14px;}.phone-chip{display:flex;align-items:center;gap:7px;font-size:14px;font-weight:700;color:var(--primary);}.phone-chip svg{width:16px;height:16px;}section{padding:64px 0;}.section-head{text-align:center;max-width:560px;margin:0 auto 34px;}.eyebrow{display:inline-flex;align-items:center;gap:8px;font-size:12.5px;font-weight:600;color:var(--primary);background:var(--primary-light);padding:7px 14px;border-radius:999px;margin-bottom:16px;}.section-head h2{font-size:clamp(22px,3vw,30px);}.section-head p{color:var(--ink-soft);margin-top:10px;font-size:14.5px;}.hero{padding:130px 0 60px;background:linear-gradient(180deg,var(--primary-light) 0%,#fff 70%);}.hero .wrap{display:grid;grid-template-columns:1.05fr .95fr;gap:44px;align-items:center;}.hero h1{font-size:clamp(30px,4.4vw,44px);}.hero h1 em{font-style:normal;color:var(--primary);}.hero p.lead{font-size:16.5px;color:var(--ink-soft);margin:18px 0 26px;max-width:44ch;}.hero-badges{display:flex;gap:18px;flex-wrap:wrap;margin-bottom:26px;}.hero-badges div{display:flex;align-items:center;gap:7px;font-size:13.5px;font-weight:500;}.hero-badges svg{width:17px;height:17px;color:var(--primary);}.hero-ctas{display:flex;gap:12px;flex-wrap:wrap;}.hero-visual{position:relative;border-radius:var(--radius);overflow:hidden;aspect-ratio:1/1;background:var(--bg-soft);}.hero-visual img{width:100%;height:100%;object-fit:cover;}.hero-visual .tag{position:absolute;bottom:14px;left:14px;background:#fff;padding:8px 14px;border-radius:8px;font-size:12.5px;font-weight:600;box-shadow:0 6px 18px rgba(22,35,61,.14);}.materials-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:20px;}.material-card{background:#fff;border:1px solid var(--border);border-radius:12px;overflow:hidden;}.material-visual{background:var(--bg-soft);padding:20px;display:flex;align-items:center;justify-content:center;aspect-ratio:1/1;}.material-visual svg{width:100%;height:100%;max-width:128px;}.material-body{padding:16px 18px 20px;}.material-body h3{font-size:12.5px;color:var(--primary);text-transform:uppercase;letter-spacing:.02em;margin-bottom:10px;}.material-body ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:7px;}.material-body li{font-size:11.5px;color:var(--ink-soft);display:flex;gap:7px;align-items:flex-start;line-height:1.45;}.material-body li::before{content:'';width:5px;height:5px;border-radius:50%;background:var(--accent);margin-top:5px;flex:none;}.estimator{background:var(--bg-soft);}.estimator-box{background:#fff;border:1px solid var(--border);border-radius:16px;padding:32px;display:grid;grid-template-columns:1.3fr 1fr;gap:36px;box-shadow:0 12px 32px rgba(22,35,61,.06);align-items:start;}#estimatorFields{transition:opacity .3s ease;}.field{margin-bottom:20px;}.field label{display:block;font-size:13px;font-weight:600;margin-bottom:9px;}.field input[type=\"number\"]{width:100%;padding:12px 14px;border:1px solid var(--border);border-radius:8px;font-family:'Inter';font-size:14px;color:var(--ink);background:#fff;}.field input:focus{outline:none;border-color:var(--primary);}.field-row{display:grid;grid-template-columns:1fr 1fr;gap:14px;}.qty-presets{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;}.qty-preset{font-size:12.5px;padding:6px 12px;border:1px solid var(--border);border-radius:999px;color:var(--ink-soft);}.qty-preset.active,.qty-preset:hover{border-color:var(--primary);color:var(--primary);background:var(--primary-light);}.shape-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;}.shape-btn{display:flex;flex-direction:column;align-items:center;gap:6px;padding:10px 4px;border:1.5px solid var(--border);border-radius:9px;background:#fff;font-size:10.5px;color:var(--ink-soft);transition:all .15s var(--ease);}.shape-btn svg{width:24px;height:24px;color:var(--ink-soft);}.shape-btn.active{border-color:var(--primary);background:var(--primary-light);color:var(--primary);}.shape-btn.active svg{color:var(--primary);}.shape-btn:hover{border-color:var(--primary);}.toggle-group{display:flex;gap:8px;flex-wrap:wrap;}.toggle-btn{padding:9px 16px;border:1.5px solid var(--border);border-radius:8px;font-size:12.5px;font-weight:500;color:var(--ink-soft);background:#fff;transition:all .15s var(--ease);}.toggle-btn.active{border-color:var(--primary);background:var(--primary-light);color:var(--primary);font-weight:600;}.toggle-btn:hover{border-color:var(--primary);}.material-pills{display:flex;gap:8px;flex-wrap:wrap;}.material-pill{font-size:12.5px;padding:8px 14px;border:1.5px solid var(--border);border-radius:999px;color:var(--ink-soft);background:#fff;transition:all .15s var(--ease);}.material-pill.active{border-color:var(--primary);background:var(--primary-light);color:var(--primary);font-weight:600;}.material-pill:hover{border-color:var(--primary);}.price-summary{background:var(--bg-soft);border:1px solid var(--border);border-radius:14px;padding:22px;position:sticky;top:90px;}.price-row-line{display:flex;justify-content:space-between;align-items:baseline;padding:9px 0;font-size:13px;color:var(--ink-soft);border-bottom:1px solid var(--border);}.price-row-line .amount{color:var(--ink);font-weight:600;}.price-row-line.promo .amount{color:var(--accent);}.price-row-line.total{border-bottom:0;padding-top:16px;align-items:flex-end;}.price-row-line.total .amount{font-family:'Be Vietnam Pro';font-size:26px;font-weight:800;color:var(--accent);}.summary-note textarea{width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;font-family:'Inter';font-size:13px;resize:vertical;min-height:56px;margin:14px 0 12px;}.promo-row{display:flex;gap:8px;margin-bottom:6px;}.promo-row input{flex:1;padding:10px 12px;border:1px solid var(--border);border-radius:8px;font-size:13px;min-width:0;}.promo-row button{padding:0 16px;border-radius:8px;border:1px solid var(--primary);background:var(--primary-light);color:var(--primary);font-size:12.5px;font-weight:600;flex:none;}.promo-msg{font-size:11.5px;margin:0 0 14px;min-height:14px;}.promo-msg.ok{color:#1D9A5B;}.promo-msg.err{color:#E4572E;}.summary-ctas{display:flex;flex-direction:column;gap:10px;}.summary-ctas .btn{width:100%;}.product-gallery{margin-top:18px;}.gallery-main{border-radius:12px;overflow:hidden;aspect-ratio:4/3;margin-bottom:8px;background:var(--bg-soft);}.gallery-main img{width:100%;height:100%;object-fit:cover;}.gallery-thumbs{display:flex;gap:8px;}.gallery-thumbs img{width:56px;height:56px;object-fit:cover;border-radius:8px;border:2px solid transparent;cursor:pointer;flex:none;}.gallery-thumbs img.active{border-color:var(--primary);}.process-3{display:grid;gap:22px;}.process-3-card{text-align:center;padding:8px;}.process-3-card .num{width:44px;height:44px;margin:0 auto 16px;border-radius:50%;background:var(--primary);color:#fff;display:flex;align-items:center;justify-content:center;font-family:'Be Vietnam Pro';font-weight:700;}.process-3-card h3{font-size:15px;margin-bottom:6px;}.process-3-card p{font-size:13px;color:var(--ink-soft);margin:0;}.why-3{display:grid;grid-template-columns:repeat(3,1fr);gap:18px;}.why-3-card{border:1px solid var(--border);border-radius:12px;padding:22px;}.why-3-card .ico{width:36px;height:36px;background:var(--primary-light);color:var(--primary);border-radius:9px;display:flex;align-items:center;justify-content:center;margin-bottom:14px;}.why-3-card h3{font-size:14.5px;margin-bottom:6px;}.why-3-card p{font-size:13px;color:var(--ink-soft);margin:0;}.gallery-2{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;}.gallery-2 img{width:100%;height:280px;object-fit:cover;border-radius:12px;}.final-cta{background:linear-gradient(135deg,var(--primary) 0%,var(--primary-dark) 100%);color:#fff;text-align:center;}.final-cta h2{font-size:clamp(22px,3vw,30px);margin-bottom:10px;}.final-cta p{opacity:.85;margin-bottom:26px;font-size:14.5px;}footer{padding:32px 0;border-top:1px solid var(--border);}footer .wrap{display:flex;justify-content:space-between;flex-wrap:wrap;gap:12px;font-size:13px;color:var(--ink-soft);}@media (max-width:820px){.hero .wrap{grid-template-columns:1fr;}.materials-grid{grid-template-columns:repeat(2,1fr);}.estimator-box{grid-template-columns:1fr;}.shape-grid{grid-template-columns:repeat(4,1fr);}.price-summary{position:static;}.process-3,.why-3{grid-template-columns:1fr !important;}}.price-hl-row{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:24px;}.price-hl-card{background:#fff;border:1.5px solid var(--border);border-radius:12px;padding:20px;text-align:center;}.price-hl-qty{font-size:12.5px;font-weight:600;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.03em;margin-bottom:8px;}.price-hl-total{font-family:'Be Vietnam Pro';font-size:24px;font-weight:800;color:var(--accent);margin-bottom:4px;}.price-hl-unit{font-size:12px;color:var(--ink-soft);}.price-table-wrap{overflow-x:auto;background:#fff;border:1px solid var(--border);border-radius:12px;}.price-table{width:100%;border-collapse:collapse;font-size:13.5px;}.price-table th{background:var(--bg-soft);padding:11px 20px;text-align:left;font-weight:700;font-size:11.5px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.03em;border-bottom:1px solid var(--border);}.price-table td{padding:11px 20px;border-bottom:1px solid var(--border);}.price-table tr:last-child td{border-bottom:0;}.price-table tr.highlight{background:var(--primary-light);}.price-table .amount{color:var(--ink);font-weight:600;text-align:right;}.price-table tr.highlight .amount{color:var(--accent);}@media (max-width:820px){.price-hl-row{grid-template-columns:1fr;}";
+
+  var PRICING_ENGINE_JS = "/**\n * C\u00f4ng th\u1ee9c t\u00ednh gi\u00e1 decal \u2014 b\u1ea3n THU\u1ea6N JS ch\u1ea1y tr\u00ean tr\u00ecnh duy\u1ec7t, kh\u00f4ng c\u1ea7n server.\n * C\u1ed5ng logic y h\u1ec7t src/pricing.js (b\u1ea3n server) \u2014 \u0111\u00e3 test \u0111\u1ed1i chi\u1ebfu cho ra c\u00f9ng k\u1ebft qu\u1ea3.\n * Ch\u1ec9 kh\u00e1c: d\u1eef li\u1ec7u Excel (GIAYDECAL/BETHUONG/KETP/BEKHO/INGIAY/INDECAL) \u0111\u01b0\u1ee3c nh\u00fang s\u1eb5n\n * d\u01b0\u1edbi d\u1ea1ng JSON t\u0129nh thay v\u00ec \u0111\u1ecdc file .xlsx qua server l\u00fac ch\u1ea1y.\n */\n(function (global) {\n  'use strict';\n\n  // ---- vlookup: d\u00f2 b\u1ea3ng gi\u00e1 theo b\u1eadc s\u1ed1 l\u01b0\u1ee3ng (gi\u1ed1ng VLOOKUP(...,TRUE) trong Excel) ----\n  function vlookup(rows, soLuong, opts) {\n    opts = opts || {};\n    if (!rows || rows.length === 0) return 0;\n    var filtered = rows;\n    if (opts.tenDecal && 'Lo\u1ea1i gi\u1ea5y' in rows[0]) {\n      filtered = filtered.filter(function (r) { return r['Lo\u1ea1i gi\u1ea5y'] === opts.tenDecal; });\n    }\n    var eligible = filtered\n      .filter(function (r) { return typeof r['S\u1ed1 l\u01b0\u1ee3ng'] === 'number' && r['S\u1ed1 l\u01b0\u1ee3ng'] <= soLuong; })\n      .sort(function (a, b) { return a['S\u1ed1 l\u01b0\u1ee3ng'] - b['S\u1ed1 l\u01b0\u1ee3ng']; });\n    if (eligible.length === 0) return 0;\n    return eligible[eligible.length - 1]['Gi\u00e1'] || 0;\n  }\n\n  var DIEN_TICH_TO = 32 * 43;\n\n  var NHOM_GIAY_THUONG = [\n    'Decal gi\u1ea5y Oji 32x40', 'Decal gi\u1ea5y Oji 32x43', 'Decal gi\u1ea5y Oji 32x45', 'Decal gi\u1ea5y Oji 33x45', 'Decal gi\u1ea5y Oji 33x48',\n    'Decal \u0111\u1ebf nh\u00e1m', 'Decal Fasson', 'Decal Kraft'\n  ];\n\n  function heSoHaoHut(shapeLabel) {\n    if (shapeLabel === 'H\u00ecnh tr\u00f2n' || shapeLabel === 'H\u00ecnh Oval') return 0.45;\n    return 0.7;\n  }\n\n  function xacDinhNhomBe(shape, widthCm, heightCm) {\n    var minDim = Math.min(widthCm, heightCm);\n    if (minDim < 2) return 'BEKHO';\n    return (shape && shape.nhomBe) || 'BETHUONG';\n  }\n\n  function uocLuongSoTemMoiTo(shapeLabel, widthCm, heightCm) {\n    var dienTichHieuDung = DIEN_TICH_TO * heSoHaoHut(shapeLabel);\n    return Math.max(1, Math.floor(dienTichHieuDung / (widthCm * heightCm)));\n  }\n\n  function tinhChiPhiSheetBased(sheets, material, shape, widthCm, heightCm, qty) {\n    if (!sheets || !material) return 0;\n    var soTemMoiTo = uocLuongSoTemMoiTo(shape && shape.label, widthCm, heightCm);\n    var soToGiayCanThiet = Math.max(1, Math.ceil(qty / soTemMoiTo));\n\n    var dungGiayThuong = NHOM_GIAY_THUONG.indexOf(material.excelLoaiGiay) !== -1;\n    var sheetIn = dungGiayThuong ? sheets.INGIAY : sheets.INDECAL;\n    var chiPhiIn = vlookup(sheetIn, soToGiayCanThiet * 2);\n\n    var nhomBe = xacDinhNhomBe(shape, widthCm, heightCm);\n    var chiPhiBe = vlookup(sheets[nhomBe], soToGiayCanThiet);\n\n    var chiPhiGiay = vlookup(sheets.GIAYDECAL, 1, { tenDecal: material.excelLoaiGiay });\n\n    var tong = (chiPhiIn * 2 + chiPhiBe + chiPhiGiay) * soToGiayCanThiet;\n    return tong / qty;\n  }\n\n  function lamTronChanHangNghin(so) {\n    return Math.ceil(so / 1000) * 1000;\n  }\n\n  function promoRateForQty(qty, tiers) {\n    var sorted = (tiers || []).slice().sort(function (a, b) { return b.minQty - a.minQty; });\n    for (var i = 0; i < sorted.length; i++) {\n      if (qty >= sorted[i].minQty) return sorted[i].rate;\n    }\n    return 0;\n  }\n\n  /**\n   * H\u00e0m t\u00ednh gi\u00e1 ch\u00ednh \u2014 t\u01b0\u01a1ng \u0111\u01b0\u01a1ng estimate() trong src/pricing.js b\u1ea3n server.\n   * @param {object} sheets   d\u1eef li\u1ec7u Excel \u0111\u00e3 nh\u00fang (GIAYDECAL/BETHUONG/KETP/BEKHO/INGIAY/INDECAL)\n   * @param {object} cfg      c\u1ea5u h\u00ecnh gi\u00e1 (floor, promoTiers, promoCode)\n   * @param {object} input    {material, shape, sides, laminate, rush, width, height, qty, promoCode}\n   *                          material/shape/sides/laminate/rush l\u00e0 object l\u1ea5y tr\u1ef1c ti\u1ebfp t\u1eeb danh s\u00e1ch cfg t\u01b0\u01a1ng \u1ee9ng\n   */\n  function estimate(sheets, cfg, input) {\n    var material = input.material;\n    var shape = input.shape;\n    var sides = input.sides || { mult: 1 };\n    var laminate = input.laminate || { mult: 1 };\n    var rush = input.rush || { mult: 1 };\n\n    var w = Math.max(parseFloat(input.width) || 0, 1);\n    var h = Math.max(parseFloat(input.height) || 0, 1);\n    var q = Math.max(parseInt(input.qty, 10) || 1, 1);\n\n    var unitFromSheets = tinhChiPhiSheetBased(sheets, material, shape, w, h, q);\n    var rawUnit = unitFromSheets * (sides.mult || 1) * (laminate.mult || 1) * (rush.mult || 1);\n    var unit = Math.max(rawUnit, cfg.floor || 0);\n    var subtotal = unit * q;\n\n    var promoRate = promoRateForQty(q, cfg.promoTiers);\n    var promoAmount = subtotal * promoRate;\n    var afterPromo = subtotal - promoAmount;\n\n    var codeApplied = false;\n    var codeAmount = 0;\n    if (input.promoCode && cfg.promoCode && cfg.promoCode.code &&\n        String(input.promoCode).trim().toUpperCase() === cfg.promoCode.code.toUpperCase()) {\n      codeApplied = true;\n      codeAmount = afterPromo * (cfg.promoCode.rate || 0);\n    }\n\n    var total = lamTronChanHangNghin(afterPromo - codeAmount);\n\n    var subtotalRounded = lamTronChanHangNghin(subtotal);\n    var displayUnit = Math.floor(subtotalRounded / q);\n    var displaySubtotal = displayUnit * q;\n    var displayPromo = Math.max(0, displaySubtotal - total);\n\n    return {\n      material: material ? material.title : null,\n      shape: shape ? shape.label : null,\n      quantity: q,\n      unit: displayUnit,\n      subtotal: displaySubtotal,\n      promoRate: promoRate,\n      promoAmount: displayPromo,\n      codeApplied: codeApplied,\n      codeAmount: 0,\n      total: total\n    };\n  }\n\n  global.DecalPricingEngine = {\n    vlookup: vlookup,\n    estimate: estimate,\n    heSoHaoHut: heSoHaoHut,\n    xacDinhNhomBe: xacDinhNhomBe,\n    uocLuongSoTemMoiTo: uocLuongSoTemMoiTo\n  };\n})(typeof window !== 'undefined' ? window : globalThis);\n";
+
+  var PAGE_JS = "(function(){" +
+    "function fv(n){return Math.round(n).toLocaleString('vi-VN')+'đ';}" +
+    "var w=document.getElementById('width'),h=document.getElementById('height'),q=document.getElementById('qty')," +
+      "heightField=document.getElementById('heightField'),widthLabel=document.getElementById('widthLabel')," +
+      "ul=document.getElementById('unitLine'),pl=document.getElementById('promoLine'),tp=document.getElementById('totalPrice')," +
+      "qp=document.querySelectorAll('.qty-preset'),pc=document.getElementById('promoCode'),ap=document.getElementById('applyPromo'),pm=document.getElementById('promoMsg')," +
+      "appliedCode='';" +
+    "function activeIdx(g){var el=document.querySelector('.opt-btn.active[data-group=\\\"'+g+'\\\"]');return el?parseInt(el.dataset.idx,10):0;}" +
+    "function activeShapeLabel(){var s=PRICING_CFG.shapes[activeIdx('shape')];return s?s.label:'';}" +
+    "function isSingleDimShape(label){return label==='Hình tròn'||label==='Hình Vuông';}" +
+    "function updateDimsMode(){var label=activeShapeLabel();if(isSingleDimShape(label)){heightField.style.display='none';widthLabel.textContent=(label==='Hình tròn')?'Đường kính (cm)':'Cạnh (cm)';h.value=w.value;}else{heightField.style.display='';widthLabel.textContent='Chiều rộng (cm)';}}" +
+    "document.querySelectorAll('.opt-btn').forEach(function(btn){btn.addEventListener('click',function(){" +
+      "var group=btn.dataset.group;" +
+      "document.querySelectorAll('.opt-btn[data-group=\\\"'+group+'\\\"]').forEach(function(b){b.classList.remove('active');});" +
+      "btn.classList.add('active');" +
+      "if(group==='shape')updateDimsMode();" +
+      "updateEstimate();" +
+    "});});" +
+    "function updateEstimate(){" +
+      "var single=isSingleDimShape(activeShapeLabel());" +
+      "var wv=parseFloat(w.value),hv=single?wv:parseFloat(h.value);" +
+      "if(!wv||wv<=0||!hv||hv<=0){ul.textContent='—';pl.textContent='—';tp.textContent='Nhập kích thước để xem giá';updatePriceTable(null);return;}" +
+      "var res=DecalPricingEngine.estimate(EXCEL_SHEETS,PRICING_CFG,{" +
+        "material:PRICING_CFG.materials[activeIdx('material')]," +
+        "shape:PRICING_CFG.shapes[activeIdx('shape')]," +
+        "laminate:PRICING_CFG.laminate[activeIdx('laminate')]," +
+        "rush:PRICING_CFG.rush[activeIdx('rush')]," +
+        "width:wv,height:hv,qty:q.value,promoCode:appliedCode||undefined" +
+      "});" +
+      "ul.textContent=fv(res.unit)+' x '+res.quantity.toLocaleString('vi-VN');" +
+      "pl.textContent=(res.promoAmount>0)?'-'+fv(res.promoAmount):'0đ';" +
+      "tp.textContent=fv(res.total);" +
+      "if(appliedCode){pm.textContent=res.codeApplied?'Áp dụng mã thành công.':'Mã không hợp lệ hoặc đã hết hạn.';pm.className='promo-msg '+(res.codeApplied?'ok':'err');}else{pm.textContent='';}" +
+      "updatePriceTable({wv:wv,hv:hv});" +
+    "}" +
+    "var priceTableQtys=[100,200,300,500,1000,2000,3000,5000,10000];" +
+    "var priceHlQtys=[500,1000,5000];" +
+    "function updatePriceTable(dims){" +
+      "var tbody=document.getElementById('priceTableBody'),hlRow=document.getElementById('priceHlRow'),desc=document.getElementById('priceTableDesc');" +
+      "if(!tbody)return;" +
+      "if(!dims){tbody.innerHTML='';hlRow.innerHTML='';desc.textContent='Chọn kiểu bế, kích thước, chất liệu ở trên để xem đủ các mức giá theo số lượng';return;}" +
+      "var shape=PRICING_CFG.shapes[activeIdx('shape')],material=PRICING_CFG.materials[activeIdx('material')]," +
+        "laminate=PRICING_CFG.laminate[activeIdx('laminate')],rush=PRICING_CFG.rush[activeIdx('rush')];" +
+      "var dimText=isSingleDimShape(activeShapeLabel())?(dims.wv+'cm'):(dims.wv+'x'+dims.hv+'cm');" +
+      "desc.textContent='Tem '+shape.label.toLowerCase()+' '+dimText+', '+material.title.toLowerCase()+', '+laminate.label.toLowerCase()+', '+rush.label.toLowerCase();" +
+      "var rowsHTML='',hlHTML='';" +
+      "priceTableQtys.forEach(function(qty){" +
+        "var r=DecalPricingEngine.estimate(EXCEL_SHEETS,PRICING_CFG,{material:material,shape:shape,laminate:laminate,rush:rush,width:dims.wv,height:dims.hv,qty:qty,promoCode:null});" +
+        "var isHl=priceHlQtys.indexOf(qty)!==-1;" +
+        "rowsHTML+='<tr'+(isHl?' class=\\\"highlight\\\"':'')+'><td>'+qty.toLocaleString('vi-VN')+'</td><td class=\\\"amount\\\">'+fv(r.unit)+'</td><td class=\\\"amount\\\">'+fv(r.total)+'</td></tr>';" +
+        "if(isHl){hlHTML+='<div class=\\\"price-hl-card\\\"><div class=\\\"price-hl-qty\\\">'+qty.toLocaleString('vi-VN')+' tem</div><div class=\\\"price-hl-total\\\">'+fv(r.total)+'</div><div class=\\\"price-hl-unit\\\">'+fv(r.unit)+' / tem</div></div>';}" +
+      "});" +
+      "tbody.innerHTML=rowsHTML;hlRow.innerHTML=hlHTML;" +
+    "}" +
+    "w.addEventListener('input',function(){if(isSingleDimShape(activeShapeLabel()))h.value=w.value;updateEstimate();});" +
+    "h.addEventListener('input',updateEstimate);" +
+    "q.addEventListener('input',updateEstimate);" +
+    "qp.forEach(function(p){p.addEventListener('click',function(){q.value=p.dataset.qty;qp.forEach(function(x){x.classList.remove('active');});p.classList.add('active');updateEstimate();});});" +
+    "ap.addEventListener('click',function(){appliedCode=pc.value.trim();updateEstimate();});" +
+    "var gm=document.getElementById('galleryMain');document.querySelectorAll('.gallery-thumbs img').forEach(function(t){t.addEventListener('click',function(){document.querySelectorAll('.gallery-thumbs img').forEach(function(x){x.classList.remove('active');});t.classList.add('active');gm.src=t.dataset.full;});});" +
+    "updateDimsMode();" +
+    "updateEstimate();" +
+  "})();";
+
+  /* ---------------- Preview + export ---------------- */
+  function updatePreview(){
+    clearTimeout(previewTimer);
+    previewTimer = setTimeout(function(){
+      document.getElementById('previewFrame').srcdoc = renderPageHTML(content, excelSheets);
+    }, 200);
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(saveLocal, 600);
+  }
+
+  function exportHTML(){
+    var html = renderPageHTML(content, excelSheets);
+    var blob = new Blob([html], {type:'text/html'});
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url; a.download = 'decal-tem-nhan-landing.html';
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  /* ---------------- Form builders ---------------- */
+  function el(tag, attrs, children){
+    var e = document.createElement(tag);
+    for (var k in (attrs||{})) {
+      if (k === 'text') e.textContent = attrs[k];
+      else e.setAttribute(k, attrs[k]);
+    }
+    (children||[]).forEach(function(c){ e.appendChild(c); });
+    return e;
+  }
+
+  function fieldText(label, value, onInput, multiline){
+    var wrap = el('div', {class:'f-row'});
+    wrap.appendChild(el('label', {text:label}));
+    var input = el(multiline ? 'textarea' : 'input', multiline ? {} : {type:'text'});
+    input.value = value || '';
+    input.addEventListener('input', function(){ onInput(input.value); updatePreview(); });
+    wrap.appendChild(input);
+    return wrap;
+  }
+
+  function fieldImage(label, value, onInput){
+    var wrap = el('div', {class:'f-row'});
+    wrap.appendChild(el('label', {text:label}));
+    var input = el('input', {type:'url', placeholder:'https://...'});
+    input.value = value || '';
+    var img = el('img', {class:'img-preview', src: value || ''});
+    img.onerror = function(){ img.style.opacity = '.3'; };
+    input.addEventListener('input', function(){ onInput(input.value); img.src = input.value; img.style.opacity='1'; updatePreview(); });
+    wrap.appendChild(input);
+
+    var uploadRow = el('div', {class:'upload-row'});
+    var fileInput = el('input', {type:'file', accept:'image/png,image/jpeg,image/webp,image/gif'});
+    var uploadStatus = el('span', {class:'upload-status'});
+    fileInput.addEventListener('change', function(){
+      var file = fileInput.files[0];
+      if (!file) return;
+      if (file.size > 800 * 1024) {
+        uploadStatus.textContent = 'Ảnh hơi nặng (' + Math.round(file.size/1024) + 'KB) — nên dùng ảnh dưới 800KB để file HTML không quá to.';
+        uploadStatus.className = 'upload-status err';
+      }
+      var reader = new FileReader();
+      reader.onload = function (e) {
+        var dataUrl = e.target.result; // nhúng thẳng base64 — không cần server
+        input.value = dataUrl;
+        onInput(dataUrl);
+        img.src = dataUrl; img.style.opacity = '1';
+        updatePreview();
+        if (file.size <= 800 * 1024) { uploadStatus.textContent = 'Đã nhúng ảnh vào trang (' + Math.round(file.size/1024) + 'KB).'; uploadStatus.className = 'upload-status ok'; }
+        fileInput.value = '';
+      };
+      reader.readAsDataURL(file);
+    });
+    uploadRow.appendChild(fileInput);
+    uploadRow.appendChild(uploadStatus);
+    wrap.appendChild(uploadRow);
+
+    wrap.appendChild(el('div', {class:'hint', text:'Tải ảnh từ máy sẽ nhúng thẳng vào file HTML (không cần host ảnh ở đâu cả) — nên dùng ảnh nhỏ (dưới ~800KB). Hoặc dán URL ảnh có sẵn từ web vào ô phía trên nếu ảnh lớn.'}));
+    wrap.appendChild(img);
+    return wrap;
+  }
+
+  function renderAll(){
+    var panel = document.getElementById('formPanel');
+    panel.innerHTML = '';
+
+    /* Dữ liệu Excel — xử lý hoàn toàn trên trình duyệt, không cần server */
+    var s0 = el('details', {class:'section', open:'true'});
+    s0.appendChild(el('summary', {text:'📊 Dữ liệu Excel (giá in/giấy/bế)'}));
+    var c0 = el('div', {class:'content'});
+    c0.appendChild(el('div', {class:'hint', text:'Trang này đã nhúng sẵn dữ liệu từ bangtinh.xlsx (đọc lúc tạo trang). Tải lên file .xlsx mới để cập nhật ngay trong bản xem trước — nhớ bấm "Xuất file HTML" sau đó để lưu vào trang thật, vì không có server nào lưu giúp bạn.'}));
+    var excelFileInput = el('input', {type:'file', accept:'.xlsx'});
+    var excelStatus = el('div', {class:'upload-status'});
+    excelFileInput.addEventListener('change', function(){
+      var file = excelFileInput.files[0];
+      if (!file) return;
+      if (typeof XLSX === 'undefined') { excelStatus.textContent = 'Lỗi: chưa nạp được thư viện đọc Excel (kiểm tra kết nối mạng khi mở admin.html).'; excelStatus.className = 'upload-status err'; return; }
+      excelStatus.textContent = 'Đang đọc file...'; excelStatus.className = 'upload-status';
+      var reader = new FileReader();
+      reader.onload = function (e) {
+        try {
+          var data = new Uint8Array(e.target.result);
+          var workbook = XLSX.read(data, { type: 'array' });
+          var needed = ['GIAYDECAL', 'BETHUONG', 'KETP', 'BEKHO', 'INGIAY', 'INDECAL'];
+          var result = {};
+          needed.forEach(function (name) {
+            var ws = workbook.Sheets[name];
+            result[name] = ws ? XLSX.utils.sheet_to_json(ws, { defval: null })
+              .filter(function (row) { return row['Giá'] !== undefined && row['Giá'] !== null; })
+              .map(function (row) {
+                var o = { 'Giá': row['Giá'] };
+                if (row['Số lượng'] !== undefined) o['Số lượng'] = row['Số lượng'];
+                if (row['Loại giấy'] !== undefined) o['Loại giấy'] = row['Loại giấy'];
+                return o;
+              }) : [];
+          });
+          var missing = needed.filter(function (name) { return result[name].length === 0; });
+          excelSheets = result;
+          updatePreview();
+          excelStatus.textContent = 'Đã nạp file mới vào bản xem trước.' + (missing.length ? ' (Không tìm thấy dữ liệu ở sheet: ' + missing.join(', ') + ')' : '');
+          excelStatus.className = 'upload-status ' + (missing.length ? 'err' : 'ok');
+          excelFileInput.value = '';
+        } catch (err) {
+          excelStatus.textContent = 'Lỗi đọc file: ' + err.message;
+          excelStatus.className = 'upload-status err';
+        }
+      };
+      reader.readAsArrayBuffer(file);
+    });
+    c0.appendChild(excelFileInput);
+    c0.appendChild(excelStatus);
+
+    var adjustRow = el('div', {class:'f-row', style:'margin-top:16px;padding-top:16px;border-top:1px solid var(--border);'});
+    adjustRow.appendChild(el('label', {text:'⚙️ Điều chỉnh giá hàng loạt'}));
+    adjustRow.appendChild(el('div', {class:'hint', text:'Áp dụng % tăng/giảm lên TOÀN BỘ giá trong 6 bảng Excel đang dùng (giá in, giấy, bế) cùng lúc — không cần tự tính tay từng dòng. Có thể bấm nhiều lần, mỗi lần cộng dồn tiếp từ giá hiện tại.'}));
+    var adjustInputRow = el('div', {class:'price-row'});
+    var pctInput = el('input', {type:'text', placeholder:'VD: 30 hoặc -10'});
+    var applyIncBtn = el('button', {class:'btn', type:'button', text:'Áp dụng'});
+    var adjustStatus = el('span', {class:'upload-status'});
+    function applyPercentAdjust(){
+      var pct = parseFloat(pctInput.value);
+      if (isNaN(pct) || pct === 0) { adjustStatus.textContent = 'Nhập số % khác 0 (VD 30 để tăng 30%, -10 để giảm 10%).'; adjustStatus.className = 'upload-status err'; return; }
+      var factor = 1 + pct / 100;
+      if (factor <= 0) { adjustStatus.textContent = 'Giảm quá 100% không hợp lệ.'; adjustStatus.className = 'upload-status err'; return; }
+      Object.keys(excelSheets).forEach(function(sheetName){
+        excelSheets[sheetName] = excelSheets[sheetName].map(function(row){
+          var copy = Object.assign({}, row);
+          if (typeof copy['Giá'] === 'number') copy['Giá'] = Math.round(copy['Giá'] * factor);
+          return copy;
+        });
+      });
+      updatePreview();
+      adjustStatus.textContent = (pct > 0 ? 'Đã tăng ' : 'Đã giảm ') + Math.abs(pct) + '% cho toàn bộ giá — nhớ Xuất file HTML để lưu.';
+      adjustStatus.className = 'upload-status ok';
+      pctInput.value = '';
+    }
+    applyIncBtn.addEventListener('click', applyPercentAdjust);
+    pctInput.addEventListener('keydown', function(e){ if (e.key === 'Enter') applyPercentAdjust(); });
+    adjustInputRow.appendChild(pctInput); adjustInputRow.appendChild(el('span', {text:'%'})); adjustInputRow.appendChild(applyIncBtn);
+    adjustRow.appendChild(adjustInputRow);
+    adjustRow.appendChild(adjustStatus);
+
+    var quickBtnRow = el('div', {style:'display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;'});
+    [10, 20, 30].forEach(function(p){
+      var upBtn = el('button', {class:'btn', type:'button', text:'+' + p + '%'});
+      upBtn.addEventListener('click', function(){ pctInput.value = String(p); applyPercentAdjust(); });
+      var downBtn = el('button', {class:'btn', type:'button', text:'-' + p + '%'});
+      downBtn.addEventListener('click', function(){ pctInput.value = String(-p); applyPercentAdjust(); });
+      quickBtnRow.appendChild(upBtn); quickBtnRow.appendChild(downBtn);
+    });
+    adjustRow.appendChild(quickBtnRow);
+    c0.appendChild(adjustRow);
+
+    s0.appendChild(c0); panel.appendChild(s0);
+
+    /* Thương hiệu */
+    var s1 = el('details', {class:'section'});
+    s1.appendChild(el('summary', {text:'Thông tin chung'}));
+    var c1 = el('div', {class:'content'});
+    c1.appendChild(fieldText('Tên thương hiệu', content.brand, function(v){ content.brand = v; }));
+    c1.appendChild(fieldText('Số điện thoại', content.phone, function(v){ content.phone = v; }));
+    c1.appendChild(fieldText('Ghi chú footer (địa chỉ ngắn)', content.footerNote, function(v){ content.footerNote = v; }));
+    s1.appendChild(c1); panel.appendChild(s1);
+
+    /* Hero */
+    var s2 = el('details', {class:'section'});
+    s2.appendChild(el('summary', {text:'Banner đầu trang (Hero)'}));
+    var c2 = el('div', {class:'content'});
+    c2.appendChild(fieldText('Nhãn nhỏ phía trên', content.hero.eyebrow, function(v){ content.hero.eyebrow = v; }));
+    c2.appendChild(fieldText('Tiêu đề chính', content.hero.title, function(v){ content.hero.title = v; }));
+    c2.appendChild(fieldText('Tiêu đề nhấn mạnh (màu xanh)', content.hero.titleEm, function(v){ content.hero.titleEm = v; }));
+    c2.appendChild(fieldText('Mô tả ngắn', content.hero.lead, function(v){ content.hero.lead = v; }, true));
+    c2.appendChild(fieldText('Nhãn giá nhỏ trên ảnh', content.hero.badge, function(v){ content.hero.badge = v; }));
+    c2.appendChild(fieldImage('Ảnh minh hoạ', content.hero.image, function(v){ content.hero.image = v; }));
+    s2.appendChild(c2); panel.appendChild(s2);
+
+    /* Materials */
+    var s3 = el('details', {class:'section'});
+    var EXCEL_LOAI_GIAY_LIST = [
+      'Decal giấy Oji 32x40', 'Decal giấy Oji 32x43', 'Decal giấy Oji 32x45', 'Decal giấy Oji 33x48',
+      'Decal đế nhám', 'amazon chấm xanh', 'amazon chấm đỏ', 'Decal Fasson', 'Decal Kraft',
+      'Decal nhựa', 'Decal PP', 'Decal 7 màu', 'Decal Trong', 'Decal Gương',
+      'Vỡ dẻo', 'Vỡ giòn', 'Vỡ KoanHao', 'Decal Bạc', 'Gương vàng'
+    ];
+
+    s3.appendChild(el('summary', {text:'Chất liệu decal (' + content.materials.length + ')'}));
+    var c3 = el('div', {class:'content'});
+    c3.appendChild(el('div', {class:'hint', text:'"Chất liệu Excel thật" quyết định giá — tra sống theo tên này trong sheet GIAYDECAL của bangtinh.xlsx mỗi lần khách tính giá. Đổi giá trong Excel là giá ở đây tự đổi theo, không cần sửa gì thêm.'}));
+    content.materials.forEach(function(m, i){
+      var card = el('div', {class:'item-card'});
+      var top = el('div', {class:'item-top'});
+      top.appendChild(el('span', {text:'Chất liệu #' + (i+1)}));
+      var rm = el('button', {class:'item-remove', text:'Xoá'});
+      rm.addEventListener('click', function(){ content.materials.splice(i,1); renderAll(); updatePreview(); });
+      top.appendChild(rm);
+      card.appendChild(top);
+      card.appendChild(fieldText('Tên hiển thị cho khách', m.title, function(v){ m.title = v; }));
+
+      var mapRow = el('div', {class:'f-row'});
+      mapRow.appendChild(el('label', {text:'Chất liệu Excel thật (quyết định giá) + màu minh hoạ'}));
+      var mapWrap = el('div', {class:'price-row'});
+      var sel = el('select');
+      EXCEL_LOAI_GIAY_LIST.forEach(function(name){
+        var o = el('option', {value: name, text: name});
+        if (m.excelLoaiGiay === name) o.setAttribute('selected', 'true');
+        sel.appendChild(o);
+      });
+      sel.value = m.excelLoaiGiay || EXCEL_LOAI_GIAY_LIST[0];
+      sel.addEventListener('change', function(){ m.excelLoaiGiay = sel.value; updatePreview(); });
+      var cInput = el('input', {type:'color'}); cInput.value = m.color || '#F3EEE4';
+      cInput.addEventListener('input', function(){ m.color = cInput.value; updatePreview(); });
+      mapWrap.appendChild(sel); mapWrap.appendChild(cInput);
+      mapRow.appendChild(mapWrap);
+      card.appendChild(mapRow);
+
+      m.bullets.forEach(function(b, bi){
+        card.appendChild(fieldText('Đặc điểm ' + (bi+1), b, function(v){ m.bullets[bi] = v; }));
+      });
+      c3.appendChild(card);
+    });
+    var addMat = el('button', {class:'add-item-btn', text:'+ Thêm chất liệu'});
+    addMat.addEventListener('click', function(){
+      content.materials.push({title:'Chất liệu mới', excelLoaiGiay: EXCEL_LOAI_GIAY_LIST[0], color:'#EAF2FD', bullets:['Đặc điểm 1','Đặc điểm 2','Đặc điểm 3']});
+      renderAll(); updatePreview();
+    });
+    c3.appendChild(addMat);
+    s3.appendChild(c3); panel.appendChild(s3);
+
+    /* Process */
+    var s4 = el('details', {class:'section'});
+    s4.appendChild(el('summary', {text:'Quy trình (' + content.process.length + ' bước)'}));
+    var c4 = el('div', {class:'content'});
+    content.process.forEach(function(p, i){
+      var card = el('div', {class:'item-card'});
+      var top = el('div', {class:'item-top'});
+      top.appendChild(el('span', {text:'Bước ' + (i+1)}));
+      var rm = el('button', {class:'item-remove', text:'Xoá'});
+      rm.addEventListener('click', function(){ content.process.splice(i,1); renderAll(); updatePreview(); });
+      top.appendChild(rm);
+      card.appendChild(top);
+      card.appendChild(fieldText('Tiêu đề bước', p.title, function(v){ p.title = v; }));
+      card.appendChild(fieldText('Mô tả', p.desc, function(v){ p.desc = v; }, true));
+      c4.appendChild(card);
+    });
+    var addProc = el('button', {class:'add-item-btn', text:'+ Thêm bước'});
+    addProc.addEventListener('click', function(){ content.process.push({title:'Bước mới', desc:'Mô tả bước'}); renderAll(); updatePreview(); });
+    c4.appendChild(addProc);
+    s4.appendChild(c4); panel.appendChild(s4);
+
+    /* Why */
+    var s5 = el('details', {class:'section'});
+    s5.appendChild(el('summary', {text:'Vì sao chọn chúng tôi (' + content.why.length + ')'}));
+    var c5 = el('div', {class:'content'});
+    content.why.forEach(function(w, i){
+      var card = el('div', {class:'item-card'});
+      var top = el('div', {class:'item-top'});
+      top.appendChild(el('span', {text:'Lý do ' + (i+1)}));
+      var rm = el('button', {class:'item-remove', text:'Xoá'});
+      rm.addEventListener('click', function(){ content.why.splice(i,1); renderAll(); updatePreview(); });
+      top.appendChild(rm);
+      card.appendChild(top);
+      card.appendChild(fieldText('Tiêu đề', w.title, function(v){ w.title = v; }));
+      card.appendChild(fieldText('Mô tả', w.desc, function(v){ w.desc = v; }, true));
+      c5.appendChild(card);
+    });
+    var addWhy = el('button', {class:'add-item-btn', text:'+ Thêm lý do'});
+    addWhy.addEventListener('click', function(){ content.why.push({title:'Lý do mới', desc:'Mô tả'}); renderAll(); updatePreview(); });
+    c5.appendChild(addWhy);
+    s5.appendChild(c5); panel.appendChild(s5);
+
+    /* Gallery */
+    var s6 = el('details', {class:'section'});
+    s6.appendChild(el('summary', {text:'Ảnh mẫu thực tế (' + content.gallery.length + ')'}));
+    var c6 = el('div', {class:'content'});
+    content.gallery.forEach(function(url, i){
+      var card = el('div', {class:'item-card'});
+      var top = el('div', {class:'item-top'});
+      top.appendChild(el('span', {text:'Ảnh ' + (i+1)}));
+      var rm = el('button', {class:'item-remove', text:'Xoá'});
+      rm.addEventListener('click', function(){ content.gallery.splice(i,1); renderAll(); updatePreview(); });
+      top.appendChild(rm);
+      card.appendChild(top);
+      card.appendChild(fieldImage('URL ảnh', url, function(v){ content.gallery[i] = v; }));
+      c6.appendChild(card);
+    });
+    var addImg = el('button', {class:'add-item-btn', text:'+ Thêm ảnh'});
+    addImg.addEventListener('click', function(){ content.gallery.push('https://'); renderAll(); updatePreview(); });
+    c6.appendChild(addImg);
+    s6.appendChild(c6); panel.appendChild(s6);
+
+    /* Final CTA */
+    var s7 = el('details', {class:'section'});
+    s7.appendChild(el('summary', {text:'Băng CTA cuối trang'}));
+    var c7 = el('div', {class:'content'});
+    c7.appendChild(fieldText('Tiêu đề', content.finalCta.title, function(v){ content.finalCta.title = v; }));
+    c7.appendChild(fieldText('Mô tả', content.finalCta.desc, function(v){ content.finalCta.desc = v; }));
+    s7.appendChild(c7); panel.appendChild(s7);
+
+    /* Pricing formula */
+    var s8 = el('details', {class:'section'});
+    s8.appendChild(el('summary', {text:'Công thức tính giá'}));
+    var c8 = el('div', {class:'content'});
+
+    c8.appendChild(fieldText('Giá sàn (đ/tem, tối thiểu)', String(content.pricing.floor), function(v){ content.pricing.floor = parseFloat(v)||0; }));
+
+    function renderNumberList(title, list, labelKey, labelText, valueKey, valueText, valueStep, addDefault){
+      var box = el('div', {class:'f-row'});
+      box.appendChild(el('label', {text:title}));
+      list.forEach(function(item, i){
+        var card = el('div', {class:'item-card'});
+        var top = el('div', {class:'item-top'});
+        top.appendChild(el('span', {text:title + ' #' + (i+1)}));
+        var rm = el('button', {class:'item-remove', text:'Xoá'});
+        rm.addEventListener('click', function(){ list.splice(i,1); renderAll(); updatePreview(); });
+        top.appendChild(rm);
+        card.appendChild(top);
+        card.appendChild(fieldText(labelText, item[labelKey], function(v){ item[labelKey] = v; }));
+        var vRow = el('div', {class:'f-row'});
+        vRow.appendChild(el('label', {text:valueText}));
+        var vInput = el('input', {type:'text'}); vInput.value = item[valueKey];
+        vInput.addEventListener('input', function(){ item[valueKey] = parseFloat(vInput.value)||0; updatePreview(); });
+        vRow.appendChild(vInput);
+        card.appendChild(vRow);
+        box.appendChild(card);
+      });
+      var addBtn = el('button', {class:'add-item-btn', text:'+ Thêm dòng'});
+      addBtn.addEventListener('click', function(){ list.push(Object.assign({}, addDefault)); renderAll(); updatePreview(); });
+      box.appendChild(addBtn);
+      return box;
+    }
+
+    function renderShapeList(list){
+      var box = el('div', {class:'f-row'});
+      box.appendChild(el('label', {text:'Kiểu bế'}));
+      box.appendChild(el('div', {class:'hint', text:'Mỗi kiểu bế thuộc 1 trong 3 nhóm giá bế thật (tra theo bậc số lượng từ file Excel): BETHUONG (bế thường — hình tròn/oval/bo góc), KETP (kẻ thành phẩm — chữ nhật/vuông thường), BEKHO (bế khó — hình phức tạp, hoặc tem có cạnh nhỏ hơn 2cm bất kể hình gì).'}));
+      list.forEach(function(item, i){
+        var card = el('div', {class:'item-card'});
+        var top = el('div', {class:'item-top'});
+        top.appendChild(el('span', {text:'Kiểu bế #' + (i+1)}));
+        var rm = el('button', {class:'item-remove', text:'Xoá'});
+        rm.addEventListener('click', function(){ list.splice(i,1); renderAll(); updatePreview(); });
+        top.appendChild(rm);
+        card.appendChild(top);
+        card.appendChild(fieldText('Tên kiểu bế', item.label, function(v){ item.label = v; }));
+        var selRow = el('div', {class:'f-row'});
+        selRow.appendChild(el('label', {text:'Nhóm giá bế'}));
+        var sel = el('select');
+        ['BETHUONG', 'KETP', 'BEKHO'].forEach(function(opt){
+          var o = el('option', {value: opt, text: opt});
+          if (item.nhomBe === opt) o.setAttribute('selected', 'true');
+          sel.appendChild(o);
+        });
+        sel.value = item.nhomBe || 'BETHUONG';
+        sel.addEventListener('change', function(){ item.nhomBe = sel.value; updatePreview(); });
+        selRow.appendChild(sel);
+        card.appendChild(selRow);
+        box.appendChild(card);
+      });
+      var addBtn = el('button', {class:'add-item-btn', text:'+ Thêm kiểu bế'});
+      addBtn.addEventListener('click', function(){ list.push({label:'Kiểu mới', nhomBe:'BETHUONG'}); renderAll(); updatePreview(); });
+      box.appendChild(addBtn);
+      return box;
+    }
+
+    c8.appendChild(renderShapeList(content.pricing.shapes));
+    c8.appendChild(renderNumberList('Số mặt', content.pricing.sides, 'label', 'Tên lựa chọn', 'mult', 'Hệ số nhân (1 = không đổi)', 0.05, {label:'Lựa chọn mới', mult:1}));
+    c8.appendChild(renderNumberList('Loại màng', content.pricing.laminate, 'label', 'Tên lựa chọn', 'mult', 'Hệ số nhân', 0.05, {label:'Lựa chọn mới', mult:1}));
+    c8.appendChild(renderNumberList('Thời gian giao', content.pricing.rush, 'label', 'Tên lựa chọn', 'mult', 'Hệ số nhân', 0.05, {label:'Lựa chọn mới', mult:1}));
+
+    var promoBox = el('div', {class:'f-row'});
+    promoBox.appendChild(el('label', {text:'Bậc khuyến mãi theo số lượng'}));
+    content.pricing.promoTiers.forEach(function(t, i){
+      var card = el('div', {class:'item-card'});
+      var top = el('div', {class:'item-top'});
+      top.appendChild(el('span', {text:'Bậc #' + (i+1)}));
+      var rm = el('button', {class:'item-remove', text:'Xoá'});
+      rm.addEventListener('click', function(){ content.pricing.promoTiers.splice(i,1); renderAll(); updatePreview(); });
+      top.appendChild(rm);
+      card.appendChild(top);
+      var row = el('div', {class:'price-row'});
+      var qInput = el('input', {type:'text'}); qInput.value = t.minQty; qInput.placeholder = 'Số lượng từ';
+      qInput.addEventListener('input', function(){ t.minQty = parseInt(qInput.value,10)||0; updatePreview(); });
+      var rInput = el('input', {type:'text'}); rInput.value = Math.round(t.rate*100); rInput.placeholder = '% giảm';
+      rInput.addEventListener('input', function(){ t.rate = (parseFloat(rInput.value)||0)/100; updatePreview(); });
+      row.appendChild(qInput); row.appendChild(el('span',{text:'cái trở lên, giảm'})); row.appendChild(rInput); row.appendChild(el('span',{text:'%'}));
+      card.appendChild(row);
+      promoBox.appendChild(card);
+    });
+    var addTier = el('button', {class:'add-item-btn', text:'+ Thêm bậc khuyến mãi'});
+    addTier.addEventListener('click', function(){ content.pricing.promoTiers.push({minQty:100, rate:0}); renderAll(); updatePreview(); });
+    promoBox.appendChild(addTier);
+    c8.appendChild(promoBox);
+
+    var codeBox = el('div', {class:'f-row'});
+    codeBox.appendChild(el('label', {text:'Mã giảm giá (demo, tự xử lý ở phía trình duyệt)'}));
+    var codeRow = el('div', {class:'price-row'});
+    var codeInput = el('input', {type:'text'}); codeInput.value = content.pricing.promoCode.code;
+    codeInput.addEventListener('input', function(){ content.pricing.promoCode.code = codeInput.value; updatePreview(); });
+    var codeRateInput = el('input', {type:'text'}); codeRateInput.value = Math.round(content.pricing.promoCode.rate*100);
+    codeRateInput.addEventListener('input', function(){ content.pricing.promoCode.rate = (parseFloat(codeRateInput.value)||0)/100; updatePreview(); });
+    codeRow.appendChild(codeInput); codeRow.appendChild(el('span',{text:'giảm thêm'})); codeRow.appendChild(codeRateInput); codeRow.appendChild(el('span',{text:'%'}));
+    codeBox.appendChild(codeRow);
+    codeBox.appendChild(el('div', {class:'hint', text:'Đây là mã demo xử lý bằng JS, chưa nối với hệ thống kiểm mã thật.'}));
+    c8.appendChild(codeBox);
+
+    s8.appendChild(c8); panel.appendChild(s8);
+
+    updatePreview();
+  }
+
+  /* ---------------- Toolbar actions ---------------- */
+  document.getElementById('exportBtn').addEventListener('click', exportHTML);
+  document.getElementById('draftBtn').addEventListener('click', saveLocal);
+  document.getElementById('resetBtn').addEventListener('click', function(){
+    if (!confirm('Khôi phục toàn bộ nội dung về mặc định? Thao tác này sẽ mất các chỉnh sửa hiện tại.')) return;
+    content = defaultContent();
+    renderAll();
+  });
+
+  loadLocal();
+})();
+</script>
+
+</body>
+</html>
