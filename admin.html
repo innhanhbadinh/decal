@@ -30,12 +30,22 @@
     return eligible[eligible.length - 1]['Giá'] || 0;
   }
 
-  var DIEN_TICH_TO = 32 * 43;
+  // (Khổ giấy giờ phụ thuộc chất liệu — xem khoGiayCho() bên dưới, không còn hằng số cố định)
 
   var NHOM_GIAY_THUONG = [
     'Decal giấy Oji 32x40', 'Decal giấy Oji 32x43', 'Decal giấy Oji 32x45', 'Decal giấy Oji 33x45', 'Decal giấy Oji 33x48',
     'Decal đế nhám', 'Decal Fasson', 'Decal Kraft'
   ];
+
+  // Danh sách chất liệu dùng khổ giấy 26x48 (decal vỡ) — còn lại mặc định dùng khổ 32x43.
+  var NHOM_KHO_26X48 = ['Vỡ dẻo', 'Vỡ giòn', 'Vỡ KoanHao'];
+
+  function khoGiayCho(material) {
+    if (material && NHOM_KHO_26X48.indexOf(material.excelLoaiGiay) !== -1) {
+      return { w: 26, h: 48 };
+    }
+    return { w: 32, h: 43 };
+  }
 
   function heSoHaoHut(shapeLabel) {
     if (shapeLabel === 'Hình tròn' || shapeLabel === 'Hình Oval') return 0.45;
@@ -48,14 +58,24 @@
     return (shape && shape.nhomBe) || 'BETHUONG';
   }
 
-  function uocLuongSoTemMoiTo(shapeLabel, widthCm, heightCm) {
-    var dienTichHieuDung = DIEN_TICH_TO * heSoHaoHut(shapeLabel);
+  function uocLuongSoTemMoiTo(shapeLabel, widthCm, heightCm, kho) {
+    var dienTichTo = kho.w * kho.h;
+    var dienTichHieuDung = dienTichTo * heSoHaoHut(shapeLabel);
     return Math.max(1, Math.floor(dienTichHieuDung / (widthCm * heightCm)));
   }
 
-  function tinhChiPhiSheetBased(sheets, material, shape, widthCm, heightCm, qty) {
+  // Tiền cán màng — tính theo DIỆN TÍCH CẢ TỜ GIẤY (không phải diện tích tem) x hệ số riêng
+  // từng loại cán, CỘNG THÊM vào tổng chi phí mỗi tờ (không còn là hệ số nhân lên giá cuối):
+  // Cán bóng = khổ giấy (dài x rộng) x 1.2 ; Cán mờ = khổ giấy x 1.5 ; Không cán = 0.
+  function tinhChiPhiCanMoiTo(laminate, kho) {
+    var canRate = (laminate && laminate.canRate) || 0;
+    return kho.w * kho.h * canRate;
+  }
+
+  function tinhChiPhiSheetBased(sheets, material, shape, laminate, widthCm, heightCm, qty) {
     if (!sheets || !material) return 0;
-    var soTemMoiTo = uocLuongSoTemMoiTo(shape && shape.label, widthCm, heightCm);
+    var kho = khoGiayCho(material);
+    var soTemMoiTo = uocLuongSoTemMoiTo(shape && shape.label, widthCm, heightCm, kho);
     var soToGiayCanThiet = Math.max(1, Math.ceil(qty / soTemMoiTo));
 
     var dungGiayThuong = NHOM_GIAY_THUONG.indexOf(material.excelLoaiGiay) !== -1;
@@ -67,7 +87,9 @@
 
     var chiPhiGiay = vlookup(sheets.GIAYDECAL, 1, { tenDecal: material.excelLoaiGiay });
 
-    var tong = (chiPhiIn * 2 + chiPhiBe + chiPhiGiay) * soToGiayCanThiet;
+    var chiPhiCan = tinhChiPhiCanMoiTo(laminate, kho);
+
+    var tong = (chiPhiIn * 2 + chiPhiBe + chiPhiGiay + chiPhiCan) * soToGiayCanThiet;
     return tong / qty;
   }
 
@@ -101,8 +123,8 @@
     var h = Math.max(parseFloat(input.height) || 0, 1);
     var q = Math.max(parseInt(input.qty, 10) || 1, 1);
 
-    var unitFromSheets = tinhChiPhiSheetBased(sheets, material, shape, w, h, q);
-    var rawUnit = unitFromSheets * (sides.mult || 1) * (laminate.mult || 1) * (rush.mult || 1);
+    var unitFromSheets = tinhChiPhiSheetBased(sheets, material, shape, laminate, w, h, q);
+    var rawUnit = unitFromSheets * (sides.mult || 1) * (rush.mult || 1);
     var unit = Math.max(rawUnit, cfg.floor || 0);
     var subtotal = unit * q;
 
@@ -144,7 +166,8 @@
     estimate: estimate,
     heSoHaoHut: heSoHaoHut,
     xacDinhNhomBe: xacDinhNhomBe,
-    uocLuongSoTemMoiTo: uocLuongSoTemMoiTo
+    uocLuongSoTemMoiTo: uocLuongSoTemMoiTo,
+    khoGiayCho: khoGiayCho
   };
 })(typeof window !== 'undefined' ? window : globalThis);
 
@@ -277,10 +300,8 @@
         shapes: [
           {label:"Hình tròn", nhomBe:"BETHUONG"},
           {label:"Hình Oval", nhomBe:"BETHUONG"},
-          {label:"Hình Vuông", nhomBe:"KETP"},
-          {label:"Vuông Bo góc", nhomBe:"BETHUONG"},
-          {label:"Hình CN", nhomBe:"KETP"},
-          {label:"HCN Bo góc", nhomBe:"BETHUONG"},
+          {label:"Hình vuông, chữ nhật", nhomBe:"KETP"},
+          {label:"Hình bo góc", nhomBe:"BETHUONG"},
           {label:"Hình hoa", nhomBe:"BEKHO"},
           {label:"Hình khác", nhomBe:"BEKHO"}
         ],
@@ -289,18 +310,16 @@
           {label:"2 mặt", mult:1.6}
         ],
         laminate: [
-          {label:"Không cán màng", mult:1},
-          {label:"Cán bóng", mult:1.15},
-          {label:"Cán mờ", mult:1.15}
+          {label:"Không cán màng", canRate:0},
+          {label:"Cán bóng", canRate:1.2},
+          {label:"Cán mờ", canRate:1.5}
         ],
         rush: [
           {label:"Giao thường (24h)", mult:1},
           {label:"Giao gấp (12h)", mult:1.25}
         ],
         promoTiers: [
-          {minQty:500, rate:0.05},
-          {minQty:1000, rate:0.08},
-          {minQty:5000, rate:0.12}
+          {minQty:1, rate:0.20}
         ],
         promoCode: {code:"BADINH5", rate:0.05}
       }
@@ -327,10 +346,8 @@
   var SHAPE_ICONS = {
     "Hình tròn": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="9"/></svg>',
     "Hình Oval": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><ellipse cx="12" cy="12" rx="10" ry="6"/></svg>',
-    "Hình Vuông": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="4" y="4" width="16" height="16"/></svg>',
-    "Vuông Bo góc": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="4" y="4" width="16" height="16" rx="4"/></svg>',
-    "Hình CN": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="2" y="6" width="20" height="12"/></svg>',
-    "HCN Bo góc": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="2" y="6" width="20" height="12" rx="4"/></svg>',
+    "Hình vuông, chữ nhật": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="1" y="7" width="22" height="10"/></svg>',
+    "Hình bo góc": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="1" y="7" width="22" height="10" rx="3"/></svg>',
     "Hình hoa": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="18" cy="12" r="5"/><circle cx="15" cy="17.2" r="5"/><circle cx="9" cy="17.2" r="5"/><circle cx="6" cy="12" r="5"/><circle cx="9" cy="6.8" r="5"/><circle cx="15" cy="6.8" r="5"/></svg>',
     "Hình khác": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-dasharray="3 2"><rect x="4" y="4" width="16" height="16" rx="6"/></svg>'
   };
@@ -376,6 +393,7 @@
     var status = document.getElementById('saveStatus');
     trySet(LOCAL_KEY, JSON.stringify(content));
     trySet('decal-static-excel-data-v1', JSON.stringify(excelSheets));
+    trySet('decal-static-excel-baseline-v1', JSON.stringify(excelBaseline));
     status.textContent = 'Đã lưu bản nháp lúc ' + new Date().toLocaleTimeString('vi-VN') + ' (chỉ lưu ở trình duyệt này)';
   }
 
@@ -385,6 +403,11 @@
       return tryGet('decal-static-excel-data-v1');
     }).then(function(ev){
       if (ev) { try { excelSheets = JSON.parse(ev); } catch (e) {} }
+      return tryGet('decal-static-excel-baseline-v1');
+    }).then(function(bv){
+      // Chỉ ghi đè mốc gốc nếu ĐÃ từng lưu trước đó (VD từng tải Excel riêng) — nếu chưa từng
+      // lưu, giữ nguyên EXCEL_DATA_DEFAULT làm mốc, không để trống.
+      if (bv) { try { excelBaseline = JSON.parse(bv); } catch (e) {} }
       renderAll();
     }).catch(function(){ renderAll(); });
   }
@@ -555,7 +578,7 @@
 
   var TEMPLATE_CSS = ":root{--primary:#0D5FBE;--primary-dark:#0A4A94;--primary-light:#EAF2FD;--accent:#FF7A1A;--accent-dark:#E86400;--ink:#16233D;--ink-soft:#5B6B84;--bg:#FFFFFF;--bg-soft:#F5F8FC;--border:#E4E9F0;--radius:12px;--maxw:1080px;--ease:cubic-bezier(.4,0,.2,1);}*,*::before,*::after{box-sizing:border-box;}html{scroll-behavior:smooth;}body{margin:0;background:var(--bg);color:var(--ink);font-family:'Inter',system-ui,sans-serif;line-height:1.55;-webkit-font-smoothing:antialiased;}h1,h2,h3{font-family:'Be Vietnam Pro',sans-serif;font-weight:700;margin:0;line-height:1.2;}a{color:inherit;text-decoration:none;}img{display:block;max-width:100%;}.wrap{max-width:var(--maxw);margin:0 auto;padding:0 24px;}button{font-family:inherit;cursor:pointer;}.reveal{opacity:1;}.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;font-size:14.5px;font-weight:600;padding:13px 24px;border-radius:9px;border:1px solid transparent;transition:transform .2s var(--ease),background .2s var(--ease);}.btn-primary{background:var(--accent);color:#fff;box-shadow:0 6px 16px rgba(255,122,26,.28);}.btn-primary:hover{transform:translateY(-2px);background:var(--accent-dark);}.btn-outline{background:#fff;border-color:var(--border);color:var(--ink);}.btn-outline:hover{border-color:var(--primary);color:var(--primary);}header{position:fixed;top:0;left:0;right:0;z-index:60;background:#fff;border-bottom:1px solid var(--border);}.header-top{display:flex;align-items:center;justify-content:space-between;padding:14px 0;}.brand{display:flex;align-items:center;gap:10px;}.brand .logo-box{width:38px;height:38px;background:var(--primary);border-radius:8px;display:flex;align-items:center;justify-content:center;color:#fff;font-family:'Be Vietnam Pro';font-weight:800;font-size:13px;flex:none;}.brand b{font-family:'Be Vietnam Pro';font-weight:800;font-size:14.5px;}.header-actions{display:flex;align-items:center;gap:14px;}.phone-chip{display:flex;align-items:center;gap:7px;font-size:14px;font-weight:700;color:var(--primary);}.phone-chip svg{width:16px;height:16px;}section{padding:64px 0;}.section-head{text-align:center;max-width:560px;margin:0 auto 34px;}.eyebrow{display:inline-flex;align-items:center;gap:8px;font-size:12.5px;font-weight:600;color:var(--primary);background:var(--primary-light);padding:7px 14px;border-radius:999px;margin-bottom:16px;}.section-head h2{font-size:clamp(22px,3vw,30px);}.section-head p{color:var(--ink-soft);margin-top:10px;font-size:14.5px;}.hero{padding:130px 0 60px;background:linear-gradient(180deg,var(--primary-light) 0%,#fff 70%);}.hero .wrap{display:grid;grid-template-columns:1.05fr .95fr;gap:44px;align-items:center;}.hero h1{font-size:clamp(30px,4.4vw,44px);}.hero h1 em{font-style:normal;color:var(--primary);}.hero p.lead{font-size:16.5px;color:var(--ink-soft);margin:18px 0 26px;max-width:44ch;}.hero-badges{display:flex;gap:18px;flex-wrap:wrap;margin-bottom:26px;}.hero-badges div{display:flex;align-items:center;gap:7px;font-size:13.5px;font-weight:500;}.hero-badges svg{width:17px;height:17px;color:var(--primary);}.hero-ctas{display:flex;gap:12px;flex-wrap:wrap;}.hero-visual{position:relative;border-radius:var(--radius);overflow:hidden;aspect-ratio:1/1;background:var(--bg-soft);}.hero-visual img{width:100%;height:100%;object-fit:cover;}.hero-visual .tag{position:absolute;bottom:14px;left:14px;background:#fff;padding:8px 14px;border-radius:8px;font-size:12.5px;font-weight:600;box-shadow:0 6px 18px rgba(22,35,61,.14);}.materials-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:20px;}.material-card{background:#fff;border:1px solid var(--border);border-radius:12px;overflow:hidden;}.material-visual{background:var(--bg-soft);padding:20px;display:flex;align-items:center;justify-content:center;aspect-ratio:1/1;}.material-visual svg{width:100%;height:100%;max-width:128px;}.material-body{padding:16px 18px 20px;}.material-body h3{font-size:12.5px;color:var(--primary);text-transform:uppercase;letter-spacing:.02em;margin-bottom:10px;}.material-body ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:7px;}.material-body li{font-size:11.5px;color:var(--ink-soft);display:flex;gap:7px;align-items:flex-start;line-height:1.45;}.material-body li::before{content:'';width:5px;height:5px;border-radius:50%;background:var(--accent);margin-top:5px;flex:none;}.estimator{background:var(--bg-soft);}.estimator-box{background:#fff;border:1px solid var(--border);border-radius:16px;padding:32px;display:grid;grid-template-columns:1.3fr 1fr;gap:36px;box-shadow:0 12px 32px rgba(22,35,61,.06);align-items:start;}#estimatorFields{transition:opacity .3s ease;}.field{margin-bottom:20px;}.field label{display:block;font-size:13px;font-weight:600;margin-bottom:9px;}.field input[type=\"number\"]{width:100%;padding:12px 14px;border:1px solid var(--border);border-radius:8px;font-family:'Inter';font-size:14px;color:var(--ink);background:#fff;}.field input:focus{outline:none;border-color:var(--primary);}.field-row{display:grid;grid-template-columns:1fr 1fr;gap:14px;}.qty-presets{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;}.qty-preset{font-size:12.5px;padding:6px 12px;border:1px solid var(--border);border-radius:999px;color:var(--ink-soft);}.qty-preset.active,.qty-preset:hover{border-color:var(--primary);color:var(--primary);background:var(--primary-light);}.shape-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;}.shape-btn{display:flex;flex-direction:column;align-items:center;gap:6px;padding:10px 4px;border:1.5px solid var(--border);border-radius:9px;background:#fff;font-size:10.5px;color:var(--ink-soft);transition:all .15s var(--ease);}.shape-btn svg{width:24px;height:24px;color:var(--ink-soft);}.shape-btn.active{border-color:var(--primary);background:var(--primary-light);color:var(--primary);}.shape-btn.active svg{color:var(--primary);}.shape-btn:hover{border-color:var(--primary);}.toggle-group{display:flex;gap:8px;flex-wrap:wrap;}.toggle-btn{padding:9px 16px;border:1.5px solid var(--border);border-radius:8px;font-size:12.5px;font-weight:500;color:var(--ink-soft);background:#fff;transition:all .15s var(--ease);}.toggle-btn.active{border-color:var(--primary);background:var(--primary-light);color:var(--primary);font-weight:600;}.toggle-btn:hover{border-color:var(--primary);}.material-pills{display:flex;gap:8px;flex-wrap:wrap;}.material-pill{font-size:12.5px;padding:8px 14px;border:1.5px solid var(--border);border-radius:999px;color:var(--ink-soft);background:#fff;transition:all .15s var(--ease);}.material-pill.active{border-color:var(--primary);background:var(--primary-light);color:var(--primary);font-weight:600;}.material-pill:hover{border-color:var(--primary);}.price-summary{background:var(--bg-soft);border:1px solid var(--border);border-radius:14px;padding:22px;position:sticky;top:90px;}.price-row-line{display:flex;justify-content:space-between;align-items:baseline;padding:9px 0;font-size:13px;color:var(--ink-soft);border-bottom:1px solid var(--border);}.price-row-line .amount{color:var(--ink);font-weight:600;}.price-row-line.promo .amount{color:var(--accent);}.price-row-line.total{border-bottom:0;padding-top:16px;align-items:flex-end;}.price-row-line.total .amount{font-family:'Be Vietnam Pro';font-size:26px;font-weight:800;color:var(--accent);}.summary-note textarea{width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;font-family:'Inter';font-size:13px;resize:vertical;min-height:56px;margin:14px 0 12px;}.promo-row{display:flex;gap:8px;margin-bottom:6px;}.promo-row input{flex:1;padding:10px 12px;border:1px solid var(--border);border-radius:8px;font-size:13px;min-width:0;}.promo-row button{padding:0 16px;border-radius:8px;border:1px solid var(--primary);background:var(--primary-light);color:var(--primary);font-size:12.5px;font-weight:600;flex:none;}.promo-msg{font-size:11.5px;margin:0 0 14px;min-height:14px;}.promo-msg.ok{color:#1D9A5B;}.promo-msg.err{color:#E4572E;}.summary-ctas{display:flex;flex-direction:column;gap:10px;}.summary-ctas .btn{width:100%;}.product-gallery{margin-top:18px;}.gallery-main{border-radius:12px;overflow:hidden;aspect-ratio:4/3;margin-bottom:8px;background:var(--bg-soft);}.gallery-main img{width:100%;height:100%;object-fit:cover;}.gallery-thumbs{display:flex;gap:8px;}.gallery-thumbs img{width:56px;height:56px;object-fit:cover;border-radius:8px;border:2px solid transparent;cursor:pointer;flex:none;}.gallery-thumbs img.active{border-color:var(--primary);}.process-3{display:grid;gap:22px;}.process-3-card{text-align:center;padding:8px;}.process-3-card .num{width:44px;height:44px;margin:0 auto 16px;border-radius:50%;background:var(--primary);color:#fff;display:flex;align-items:center;justify-content:center;font-family:'Be Vietnam Pro';font-weight:700;}.process-3-card h3{font-size:15px;margin-bottom:6px;}.process-3-card p{font-size:13px;color:var(--ink-soft);margin:0;}.why-3{display:grid;grid-template-columns:repeat(3,1fr);gap:18px;}.why-3-card{border:1px solid var(--border);border-radius:12px;padding:22px;}.why-3-card .ico{width:36px;height:36px;background:var(--primary-light);color:var(--primary);border-radius:9px;display:flex;align-items:center;justify-content:center;margin-bottom:14px;}.why-3-card h3{font-size:14.5px;margin-bottom:6px;}.why-3-card p{font-size:13px;color:var(--ink-soft);margin:0;}.gallery-2{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;}.gallery-2 img{width:100%;height:280px;object-fit:cover;border-radius:12px;}.final-cta{background:linear-gradient(135deg,var(--primary) 0%,var(--primary-dark) 100%);color:#fff;text-align:center;}.final-cta h2{font-size:clamp(22px,3vw,30px);margin-bottom:10px;}.final-cta p{opacity:.85;margin-bottom:26px;font-size:14.5px;}footer{padding:32px 0;border-top:1px solid var(--border);}footer .wrap{display:flex;justify-content:space-between;flex-wrap:wrap;gap:12px;font-size:13px;color:var(--ink-soft);}@media (max-width:820px){.hero .wrap{grid-template-columns:1fr;}.materials-grid{grid-template-columns:repeat(2,1fr);}.estimator-box{grid-template-columns:1fr;}.shape-grid{grid-template-columns:repeat(4,1fr);}.price-summary{position:static;}.process-3,.why-3{grid-template-columns:1fr !important;}}.price-hl-row{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:24px;}.price-hl-card{background:#fff;border:1.5px solid var(--border);border-radius:12px;padding:20px;text-align:center;}.price-hl-qty{font-size:12.5px;font-weight:600;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.03em;margin-bottom:8px;}.price-hl-total{font-family:'Be Vietnam Pro';font-size:24px;font-weight:800;color:var(--accent);margin-bottom:4px;}.price-hl-unit{font-size:12px;color:var(--ink-soft);}.price-table-wrap{overflow-x:auto;background:#fff;border:1px solid var(--border);border-radius:12px;}.price-table{width:100%;border-collapse:collapse;font-size:13.5px;}.price-table th{background:var(--bg-soft);padding:11px 20px;text-align:left;font-weight:700;font-size:11.5px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.03em;border-bottom:1px solid var(--border);}.price-table td{padding:11px 20px;border-bottom:1px solid var(--border);}.price-table tr:last-child td{border-bottom:0;}.price-table tr.highlight{background:var(--primary-light);}.price-table .amount{color:var(--ink);font-weight:600;text-align:right;}.price-table tr.highlight .amount{color:var(--accent);}@media (max-width:820px){.price-hl-row{grid-template-columns:1fr;}";
 
-  var PRICING_ENGINE_JS = "/**\n * C\u00f4ng th\u1ee9c t\u00ednh gi\u00e1 decal \u2014 b\u1ea3n THU\u1ea6N JS ch\u1ea1y tr\u00ean tr\u00ecnh duy\u1ec7t, kh\u00f4ng c\u1ea7n server.\n * C\u1ed5ng logic y h\u1ec7t src/pricing.js (b\u1ea3n server) \u2014 \u0111\u00e3 test \u0111\u1ed1i chi\u1ebfu cho ra c\u00f9ng k\u1ebft qu\u1ea3.\n * Ch\u1ec9 kh\u00e1c: d\u1eef li\u1ec7u Excel (GIAYDECAL/BETHUONG/KETP/BEKHO/INGIAY/INDECAL) \u0111\u01b0\u1ee3c nh\u00fang s\u1eb5n\n * d\u01b0\u1edbi d\u1ea1ng JSON t\u0129nh thay v\u00ec \u0111\u1ecdc file .xlsx qua server l\u00fac ch\u1ea1y.\n */\n(function (global) {\n  'use strict';\n\n  // ---- vlookup: d\u00f2 b\u1ea3ng gi\u00e1 theo b\u1eadc s\u1ed1 l\u01b0\u1ee3ng (gi\u1ed1ng VLOOKUP(...,TRUE) trong Excel) ----\n  function vlookup(rows, soLuong, opts) {\n    opts = opts || {};\n    if (!rows || rows.length === 0) return 0;\n    var filtered = rows;\n    if (opts.tenDecal && 'Lo\u1ea1i gi\u1ea5y' in rows[0]) {\n      filtered = filtered.filter(function (r) { return r['Lo\u1ea1i gi\u1ea5y'] === opts.tenDecal; });\n    }\n    var eligible = filtered\n      .filter(function (r) { return typeof r['S\u1ed1 l\u01b0\u1ee3ng'] === 'number' && r['S\u1ed1 l\u01b0\u1ee3ng'] <= soLuong; })\n      .sort(function (a, b) { return a['S\u1ed1 l\u01b0\u1ee3ng'] - b['S\u1ed1 l\u01b0\u1ee3ng']; });\n    if (eligible.length === 0) return 0;\n    return eligible[eligible.length - 1]['Gi\u00e1'] || 0;\n  }\n\n  var DIEN_TICH_TO = 32 * 43;\n\n  var NHOM_GIAY_THUONG = [\n    'Decal gi\u1ea5y Oji 32x40', 'Decal gi\u1ea5y Oji 32x43', 'Decal gi\u1ea5y Oji 32x45', 'Decal gi\u1ea5y Oji 33x45', 'Decal gi\u1ea5y Oji 33x48',\n    'Decal \u0111\u1ebf nh\u00e1m', 'Decal Fasson', 'Decal Kraft'\n  ];\n\n  function heSoHaoHut(shapeLabel) {\n    if (shapeLabel === 'H\u00ecnh tr\u00f2n' || shapeLabel === 'H\u00ecnh Oval') return 0.45;\n    return 0.7;\n  }\n\n  function xacDinhNhomBe(shape, widthCm, heightCm) {\n    var minDim = Math.min(widthCm, heightCm);\n    if (minDim < 2) return 'BEKHO';\n    return (shape && shape.nhomBe) || 'BETHUONG';\n  }\n\n  function uocLuongSoTemMoiTo(shapeLabel, widthCm, heightCm) {\n    var dienTichHieuDung = DIEN_TICH_TO * heSoHaoHut(shapeLabel);\n    return Math.max(1, Math.floor(dienTichHieuDung / (widthCm * heightCm)));\n  }\n\n  function tinhChiPhiSheetBased(sheets, material, shape, widthCm, heightCm, qty) {\n    if (!sheets || !material) return 0;\n    var soTemMoiTo = uocLuongSoTemMoiTo(shape && shape.label, widthCm, heightCm);\n    var soToGiayCanThiet = Math.max(1, Math.ceil(qty / soTemMoiTo));\n\n    var dungGiayThuong = NHOM_GIAY_THUONG.indexOf(material.excelLoaiGiay) !== -1;\n    var sheetIn = dungGiayThuong ? sheets.INGIAY : sheets.INDECAL;\n    var chiPhiIn = vlookup(sheetIn, soToGiayCanThiet * 2);\n\n    var nhomBe = xacDinhNhomBe(shape, widthCm, heightCm);\n    var chiPhiBe = vlookup(sheets[nhomBe], soToGiayCanThiet);\n\n    var chiPhiGiay = vlookup(sheets.GIAYDECAL, 1, { tenDecal: material.excelLoaiGiay });\n\n    var tong = (chiPhiIn * 2 + chiPhiBe + chiPhiGiay) * soToGiayCanThiet;\n    return tong / qty;\n  }\n\n  function lamTronChanHangNghin(so) {\n    return Math.ceil(so / 1000) * 1000;\n  }\n\n  function promoRateForQty(qty, tiers) {\n    var sorted = (tiers || []).slice().sort(function (a, b) { return b.minQty - a.minQty; });\n    for (var i = 0; i < sorted.length; i++) {\n      if (qty >= sorted[i].minQty) return sorted[i].rate;\n    }\n    return 0;\n  }\n\n  /**\n   * H\u00e0m t\u00ednh gi\u00e1 ch\u00ednh \u2014 t\u01b0\u01a1ng \u0111\u01b0\u01a1ng estimate() trong src/pricing.js b\u1ea3n server.\n   * @param {object} sheets   d\u1eef li\u1ec7u Excel \u0111\u00e3 nh\u00fang (GIAYDECAL/BETHUONG/KETP/BEKHO/INGIAY/INDECAL)\n   * @param {object} cfg      c\u1ea5u h\u00ecnh gi\u00e1 (floor, promoTiers, promoCode)\n   * @param {object} input    {material, shape, sides, laminate, rush, width, height, qty, promoCode}\n   *                          material/shape/sides/laminate/rush l\u00e0 object l\u1ea5y tr\u1ef1c ti\u1ebfp t\u1eeb danh s\u00e1ch cfg t\u01b0\u01a1ng \u1ee9ng\n   */\n  function estimate(sheets, cfg, input) {\n    var material = input.material;\n    var shape = input.shape;\n    var sides = input.sides || { mult: 1 };\n    var laminate = input.laminate || { mult: 1 };\n    var rush = input.rush || { mult: 1 };\n\n    var w = Math.max(parseFloat(input.width) || 0, 1);\n    var h = Math.max(parseFloat(input.height) || 0, 1);\n    var q = Math.max(parseInt(input.qty, 10) || 1, 1);\n\n    var unitFromSheets = tinhChiPhiSheetBased(sheets, material, shape, w, h, q);\n    var rawUnit = unitFromSheets * (sides.mult || 1) * (laminate.mult || 1) * (rush.mult || 1);\n    var unit = Math.max(rawUnit, cfg.floor || 0);\n    var subtotal = unit * q;\n\n    var promoRate = promoRateForQty(q, cfg.promoTiers);\n    var promoAmount = subtotal * promoRate;\n    var afterPromo = subtotal - promoAmount;\n\n    var codeApplied = false;\n    var codeAmount = 0;\n    if (input.promoCode && cfg.promoCode && cfg.promoCode.code &&\n        String(input.promoCode).trim().toUpperCase() === cfg.promoCode.code.toUpperCase()) {\n      codeApplied = true;\n      codeAmount = afterPromo * (cfg.promoCode.rate || 0);\n    }\n\n    var total = lamTronChanHangNghin(afterPromo - codeAmount);\n\n    var subtotalRounded = lamTronChanHangNghin(subtotal);\n    var displayUnit = Math.floor(subtotalRounded / q);\n    var displaySubtotal = displayUnit * q;\n    var displayPromo = Math.max(0, displaySubtotal - total);\n\n    return {\n      material: material ? material.title : null,\n      shape: shape ? shape.label : null,\n      quantity: q,\n      unit: displayUnit,\n      subtotal: displaySubtotal,\n      promoRate: promoRate,\n      promoAmount: displayPromo,\n      codeApplied: codeApplied,\n      codeAmount: 0,\n      total: total\n    };\n  }\n\n  global.DecalPricingEngine = {\n    vlookup: vlookup,\n    estimate: estimate,\n    heSoHaoHut: heSoHaoHut,\n    xacDinhNhomBe: xacDinhNhomBe,\n    uocLuongSoTemMoiTo: uocLuongSoTemMoiTo\n  };\n})(typeof window !== 'undefined' ? window : globalThis);\n";
+  var PRICING_ENGINE_JS = "/**\n * C\u00f4ng th\u1ee9c t\u00ednh gi\u00e1 decal \u2014 b\u1ea3n THU\u1ea6N JS ch\u1ea1y tr\u00ean tr\u00ecnh duy\u1ec7t, kh\u00f4ng c\u1ea7n server.\n * C\u1ed5ng logic y h\u1ec7t src/pricing.js (b\u1ea3n server) \u2014 \u0111\u00e3 test \u0111\u1ed1i chi\u1ebfu cho ra c\u00f9ng k\u1ebft qu\u1ea3.\n * Ch\u1ec9 kh\u00e1c: d\u1eef li\u1ec7u Excel (GIAYDECAL/BETHUONG/KETP/BEKHO/INGIAY/INDECAL) \u0111\u01b0\u1ee3c nh\u00fang s\u1eb5n\n * d\u01b0\u1edbi d\u1ea1ng JSON t\u0129nh thay v\u00ec \u0111\u1ecdc file .xlsx qua server l\u00fac ch\u1ea1y.\n */\n(function (global) {\n  'use strict';\n\n  // ---- vlookup: d\u00f2 b\u1ea3ng gi\u00e1 theo b\u1eadc s\u1ed1 l\u01b0\u1ee3ng (gi\u1ed1ng VLOOKUP(...,TRUE) trong Excel) ----\n  function vlookup(rows, soLuong, opts) {\n    opts = opts || {};\n    if (!rows || rows.length === 0) return 0;\n    var filtered = rows;\n    if (opts.tenDecal && 'Lo\u1ea1i gi\u1ea5y' in rows[0]) {\n      filtered = filtered.filter(function (r) { return r['Lo\u1ea1i gi\u1ea5y'] === opts.tenDecal; });\n    }\n    var eligible = filtered\n      .filter(function (r) { return typeof r['S\u1ed1 l\u01b0\u1ee3ng'] === 'number' && r['S\u1ed1 l\u01b0\u1ee3ng'] <= soLuong; })\n      .sort(function (a, b) { return a['S\u1ed1 l\u01b0\u1ee3ng'] - b['S\u1ed1 l\u01b0\u1ee3ng']; });\n    if (eligible.length === 0) return 0;\n    return eligible[eligible.length - 1]['Gi\u00e1'] || 0;\n  }\n\n  // (Kh\u1ed5 gi\u1ea5y gi\u1edd ph\u1ee5 thu\u1ed9c ch\u1ea5t li\u1ec7u \u2014 xem khoGiayCho() b\u00ean d\u01b0\u1edbi, kh\u00f4ng c\u00f2n h\u1eb1ng s\u1ed1 c\u1ed1 \u0111\u1ecbnh)\n\n  var NHOM_GIAY_THUONG = [\n    'Decal gi\u1ea5y Oji 32x40', 'Decal gi\u1ea5y Oji 32x43', 'Decal gi\u1ea5y Oji 32x45', 'Decal gi\u1ea5y Oji 33x45', 'Decal gi\u1ea5y Oji 33x48',\n    'Decal \u0111\u1ebf nh\u00e1m', 'Decal Fasson', 'Decal Kraft'\n  ];\n\n  // Danh s\u00e1ch ch\u1ea5t li\u1ec7u d\u00f9ng kh\u1ed5 gi\u1ea5y 26x48 (decal v\u1ee1) \u2014 c\u00f2n l\u1ea1i m\u1eb7c \u0111\u1ecbnh d\u00f9ng kh\u1ed5 32x43.\n  var NHOM_KHO_26X48 = ['V\u1ee1 d\u1ebbo', 'V\u1ee1 gi\u00f2n', 'V\u1ee1 KoanHao'];\n\n  function khoGiayCho(material) {\n    if (material && NHOM_KHO_26X48.indexOf(material.excelLoaiGiay) !== -1) {\n      return { w: 26, h: 48 };\n    }\n    return { w: 32, h: 43 };\n  }\n\n  function heSoHaoHut(shapeLabel) {\n    if (shapeLabel === 'H\u00ecnh tr\u00f2n' || shapeLabel === 'H\u00ecnh Oval') return 0.45;\n    return 0.7;\n  }\n\n  function xacDinhNhomBe(shape, widthCm, heightCm) {\n    var minDim = Math.min(widthCm, heightCm);\n    if (minDim < 2) return 'BEKHO';\n    return (shape && shape.nhomBe) || 'BETHUONG';\n  }\n\n  function uocLuongSoTemMoiTo(shapeLabel, widthCm, heightCm, kho) {\n    var dienTichTo = kho.w * kho.h;\n    var dienTichHieuDung = dienTichTo * heSoHaoHut(shapeLabel);\n    return Math.max(1, Math.floor(dienTichHieuDung / (widthCm * heightCm)));\n  }\n\n  // Ti\u1ec1n c\u00e1n m\u00e0ng \u2014 t\u00ednh theo DI\u1ec6N T\u00cdCH C\u1ea2 T\u1edc GI\u1ea4Y (kh\u00f4ng ph\u1ea3i di\u1ec7n t\u00edch tem) x h\u1ec7 s\u1ed1 ri\u00eang\n  // t\u1eebng lo\u1ea1i c\u00e1n, C\u1ed8NG TH\u00caM v\u00e0o t\u1ed5ng chi ph\u00ed m\u1ed7i t\u1edd (kh\u00f4ng c\u00f2n l\u00e0 h\u1ec7 s\u1ed1 nh\u00e2n l\u00ean gi\u00e1 cu\u1ed1i):\n  // C\u00e1n b\u00f3ng = kh\u1ed5 gi\u1ea5y (d\u00e0i x r\u1ed9ng) x 1.2 ; C\u00e1n m\u1edd = kh\u1ed5 gi\u1ea5y x 1.5 ; Kh\u00f4ng c\u00e1n = 0.\n  function tinhChiPhiCanMoiTo(laminate, kho) {\n    var canRate = (laminate && laminate.canRate) || 0;\n    return kho.w * kho.h * canRate;\n  }\n\n  function tinhChiPhiSheetBased(sheets, material, shape, laminate, widthCm, heightCm, qty) {\n    if (!sheets || !material) return 0;\n    var kho = khoGiayCho(material);\n    var soTemMoiTo = uocLuongSoTemMoiTo(shape && shape.label, widthCm, heightCm, kho);\n    var soToGiayCanThiet = Math.max(1, Math.ceil(qty / soTemMoiTo));\n\n    var dungGiayThuong = NHOM_GIAY_THUONG.indexOf(material.excelLoaiGiay) !== -1;\n    var sheetIn = dungGiayThuong ? sheets.INGIAY : sheets.INDECAL;\n    var chiPhiIn = vlookup(sheetIn, soToGiayCanThiet * 2);\n\n    var nhomBe = xacDinhNhomBe(shape, widthCm, heightCm);\n    var chiPhiBe = vlookup(sheets[nhomBe], soToGiayCanThiet);\n\n    var chiPhiGiay = vlookup(sheets.GIAYDECAL, 1, { tenDecal: material.excelLoaiGiay });\n\n    var chiPhiCan = tinhChiPhiCanMoiTo(laminate, kho);\n\n    var tong = (chiPhiIn * 2 + chiPhiBe + chiPhiGiay + chiPhiCan) * soToGiayCanThiet;\n    return tong / qty;\n  }\n\n  function lamTronChanHangNghin(so) {\n    return Math.ceil(so / 1000) * 1000;\n  }\n\n  function promoRateForQty(qty, tiers) {\n    var sorted = (tiers || []).slice().sort(function (a, b) { return b.minQty - a.minQty; });\n    for (var i = 0; i < sorted.length; i++) {\n      if (qty >= sorted[i].minQty) return sorted[i].rate;\n    }\n    return 0;\n  }\n\n  /**\n   * H\u00e0m t\u00ednh gi\u00e1 ch\u00ednh \u2014 t\u01b0\u01a1ng \u0111\u01b0\u01a1ng estimate() trong src/pricing.js b\u1ea3n server.\n   * @param {object} sheets   d\u1eef li\u1ec7u Excel \u0111\u00e3 nh\u00fang (GIAYDECAL/BETHUONG/KETP/BEKHO/INGIAY/INDECAL)\n   * @param {object} cfg      c\u1ea5u h\u00ecnh gi\u00e1 (floor, promoTiers, promoCode)\n   * @param {object} input    {material, shape, sides, laminate, rush, width, height, qty, promoCode}\n   *                          material/shape/sides/laminate/rush l\u00e0 object l\u1ea5y tr\u1ef1c ti\u1ebfp t\u1eeb danh s\u00e1ch cfg t\u01b0\u01a1ng \u1ee9ng\n   */\n  function estimate(sheets, cfg, input) {\n    var material = input.material;\n    var shape = input.shape;\n    var sides = input.sides || { mult: 1 };\n    var laminate = input.laminate || { mult: 1 };\n    var rush = input.rush || { mult: 1 };\n\n    var w = Math.max(parseFloat(input.width) || 0, 1);\n    var h = Math.max(parseFloat(input.height) || 0, 1);\n    var q = Math.max(parseInt(input.qty, 10) || 1, 1);\n\n    var unitFromSheets = tinhChiPhiSheetBased(sheets, material, shape, laminate, w, h, q);\n    var rawUnit = unitFromSheets * (sides.mult || 1) * (rush.mult || 1);\n    var unit = Math.max(rawUnit, cfg.floor || 0);\n    var subtotal = unit * q;\n\n    var promoRate = promoRateForQty(q, cfg.promoTiers);\n    var promoAmount = subtotal * promoRate;\n    var afterPromo = subtotal - promoAmount;\n\n    var codeApplied = false;\n    var codeAmount = 0;\n    if (input.promoCode && cfg.promoCode && cfg.promoCode.code &&\n        String(input.promoCode).trim().toUpperCase() === cfg.promoCode.code.toUpperCase()) {\n      codeApplied = true;\n      codeAmount = afterPromo * (cfg.promoCode.rate || 0);\n    }\n\n    var total = lamTronChanHangNghin(afterPromo - codeAmount);\n\n    var subtotalRounded = lamTronChanHangNghin(subtotal);\n    var displayUnit = Math.floor(subtotalRounded / q);\n    var displaySubtotal = displayUnit * q;\n    var displayPromo = Math.max(0, displaySubtotal - total);\n\n    return {\n      material: material ? material.title : null,\n      shape: shape ? shape.label : null,\n      quantity: q,\n      unit: displayUnit,\n      subtotal: displaySubtotal,\n      promoRate: promoRate,\n      promoAmount: displayPromo,\n      codeApplied: codeApplied,\n      codeAmount: 0,\n      total: total\n    };\n  }\n\n  global.DecalPricingEngine = {\n    vlookup: vlookup,\n    estimate: estimate,\n    heSoHaoHut: heSoHaoHut,\n    xacDinhNhomBe: xacDinhNhomBe,\n    uocLuongSoTemMoiTo: uocLuongSoTemMoiTo,\n    khoGiayCho: khoGiayCho\n  };\n})(typeof window !== 'undefined' ? window : globalThis);\n";
 
   var PAGE_JS = "(function(){" +
     "function fv(n){return Math.round(n).toLocaleString('vi-VN')+'đ';}" +
@@ -566,7 +589,7 @@
       "appliedCode='';" +
     "function activeIdx(g){var el=document.querySelector('.opt-btn.active[data-group=\\\"'+g+'\\\"]');return el?parseInt(el.dataset.idx,10):0;}" +
     "function activeShapeLabel(){var s=PRICING_CFG.shapes[activeIdx('shape')];return s?s.label:'';}" +
-    "function isSingleDimShape(label){return label==='Hình tròn'||label==='Hình Vuông';}" +
+    "function isSingleDimShape(label){return label==='Hình tròn';}" +
     "function updateDimsMode(){var label=activeShapeLabel();if(isSingleDimShape(label)){heightField.style.display='none';widthLabel.textContent=(label==='Hình tròn')?'Đường kính (cm)':'Cạnh (cm)';h.value=w.value;}else{heightField.style.display='';widthLabel.textContent='Chiều rộng (cm)';}}" +
     "document.querySelectorAll('.opt-btn').forEach(function(btn){btn.addEventListener('click',function(){" +
       "var group=btn.dataset.group;" +
@@ -741,6 +764,7 @@
           excelSheets = result;
           excelBaseline = JSON.parse(JSON.stringify(result));
           updatePreview();
+          saveLocal();
           excelStatus.textContent = 'Đã nạp file mới vào bản xem trước.' + (missing.length ? ' (Không tìm thấy dữ liệu ở sheet: ' + missing.join(', ') + ')' : '');
           excelStatus.className = 'upload-status ' + (missing.length ? 'err' : 'ok');
           excelFileInput.value = '';
@@ -778,6 +802,7 @@
       });
       excelSheets = next;
       updatePreview();
+      saveLocal();
       adjustStatus.textContent = (pct > 0 ? 'Đã đặt giá tăng ' : 'Đã đặt giá giảm ') + Math.abs(pct) + '% so với giá gốc — nhớ Xuất file HTML để lưu.';
       adjustStatus.className = 'upload-status ok';
       pctInput.value = '';
@@ -786,6 +811,7 @@
     resetPriceBtn.addEventListener('click', function(){
       excelSheets = JSON.parse(JSON.stringify(excelBaseline));
       updatePreview();
+      saveLocal();
       adjustStatus.textContent = 'Đã khôi phục về giá gốc.';
       adjustStatus.className = 'upload-status ok';
     });
@@ -796,12 +822,17 @@
     adjustRow.appendChild(adjustStatus);
 
     var quickBtnRow = el('div', {style:'display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;'});
-    [10, 20, 30, 40, 50].forEach(function(p){
-      var upBtn = el('button', {class:'btn', type:'button', text:'+' + p + '%'});
-      upBtn.addEventListener('click', function(){ pctInput.value = String(p); applyPercentAdjust(); });
-      quickBtnRow.appendChild(upBtn);
+    [-50, -40, -30, -20, -10].forEach(function(p){
+      var btn = el('button', {class:'btn', type:'button', text: p + '%'});
+      btn.addEventListener('click', function(){ pctInput.value = String(p); applyPercentAdjust(); });
+      quickBtnRow.appendChild(btn);
     });
     quickBtnRow.appendChild(resetPriceBtn);
+    [10, 20, 30, 40, 50].forEach(function(p){
+      var btn = el('button', {class:'btn', type:'button', text:'+' + p + '%'});
+      btn.addEventListener('click', function(){ pctInput.value = String(p); applyPercentAdjust(); });
+      quickBtnRow.appendChild(btn);
+    });
     adjustRow.appendChild(quickBtnRow);
     c0.appendChild(adjustRow);
 
@@ -1018,7 +1049,9 @@
 
     c8.appendChild(renderShapeList(content.pricing.shapes));
     c8.appendChild(renderNumberList('Số mặt', content.pricing.sides, 'label', 'Tên lựa chọn', 'mult', 'Hệ số nhân (1 = không đổi)', 0.05, {label:'Lựa chọn mới', mult:1}));
-    c8.appendChild(renderNumberList('Loại màng', content.pricing.laminate, 'label', 'Tên lựa chọn', 'mult', 'Hệ số nhân', 0.05, {label:'Lựa chọn mới', mult:1}));
+    var laminateBox = renderNumberList('Loại màng', content.pricing.laminate, 'label', 'Tên lựa chọn', 'canRate', 'Hệ số cán (đ/cm² khổ giấy)', 0.1, {label:'Lựa chọn mới', canRate:0});
+    laminateBox.insertBefore(el('div', {class:'hint', text:'Tiền cán = (khổ giấy dài x rộng) x hệ số này, cộng thêm vào chi phí mỗi tờ — KHÔNG phải nhân lên giá cuối. Khổ giấy mặc định 32x43cm, riêng nhóm decal vỡ (Vỡ dẻo/giòn/KoanHao) dùng khổ 26x48cm.'}), laminateBox.firstChild);
+    c8.appendChild(laminateBox);
     c8.appendChild(renderNumberList('Thời gian giao', content.pricing.rush, 'label', 'Tên lựa chọn', 'mult', 'Hệ số nhân', 0.05, {label:'Lựa chọn mới', mult:1}));
 
     var promoBox = el('div', {class:'f-row'});
